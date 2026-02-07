@@ -1,0 +1,36 @@
+_BASE_: "../../../configs/Base-RCNN-FPN.yaml"
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  MASK_ON: True
+  RESNETS:
+    DEPTH: 50
+  ROI_HEADS:
+    BATCH_SIZE_PER_IMAGE: 512
+    NUM_CLASSES: 1  # Only GRG class
+    SCORE_THRESH_TEST: 0.0  # Adjust based on validation performance
+  # We load precomputed proposals in custom mapper (from NPZ files)
+  # So LOAD_PROPOSALS should be False (it expects pickle files)
+  LOAD_PROPOSALS: False
+  PROPOSAL_GENERATOR:
+    NAME: "PrecomputedProposals"
+DATASETS:
+  TRAIN: ("grg_train",)
+  TEST: ("grg_val",)
+  PRECOMPUTED_PROPOSAL_TOPK_TRAIN: 10000
+  PRECOMPUTED_PROPOSAL_TOPK_TEST: 10000
+SOLVER:
+  IMS_PER_BATCH: 8  # Adjust based on your GPU memory
+  BASE_LR: 0.001
+  STEPS: (15000, 20000)
+  MAX_ITER: 25000
+  CHECKPOINT_PERIOD: 2500
+  WARMUP_ITERS: 500
+INPUT:
+  MIN_SIZE_TRAIN: (300,)  # Match your image size
+  MAX_SIZE_TRAIN: 300
+  MIN_SIZE_TEST: 300
+  MAX_SIZE_TEST: 300
+  MASK_FORMAT: "bitmask"  # Use "bitmask" for RLE format annotations
+TEST:
+  EVAL_PERIOD: 1000  # Evaluate every 1000 iterations
+OUTPUT_DIR: "./output/grg_mask_rcnn"

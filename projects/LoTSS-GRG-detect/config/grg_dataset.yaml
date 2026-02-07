@@ -1,0 +1,28 @@
+# The assumed structure of the dataset is as follows:
+# DATA_ROOT/
+# ├── train/
+# │   ├── images/
+# │   └── annotations.json
+# ├── val/
+# │   ├── images/
+# │   └── annotations.json
+# └── test/
+#     ├── images/
+#     └── annotations.json
+DATA_ROOT: "/home/s4861264/project_data/full-dataset"
+DATASET_NAME: "grg_dataset"
+TRAIN:
+  EXISTS: True
+  NAME: "train"
+  IMAGES: "images"
+  ANNOTATIONS: "annotations.json"
+VALIDATION:
+  EXISTS: True
+  NAME: "val"
+  IMAGES: "images"
+  ANNOTATIONS: "annotations.json"
+TEST:
+  EXISTS: True
+  NAME: "test"
+  IMAGES: "images"
+  ANNOTATIONS: "annotations.json"

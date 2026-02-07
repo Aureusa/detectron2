@@ -12,14 +12,14 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from detectron2.engine import DefaultTrainer
-from detectron2.evaluation import COCOEvaluator
-from detectron2.data import DatasetCatalog
+from detectron2.evaluation import COCOEvaluator, DatasetEvaluators
+from detectron2.data import DatasetCatalog, MetadataCatalog
 from detectron2.data import build_detection_train_loader, build_detection_test_loader
 from detectron2.data.samplers import InferenceSampler
 
 # Import custom modules from parent directory
-sys.path.insert(0, str(project_root))
 from data.dataset_mapper import GRGDatasetMapper as NPZProposalDatasetMapper
+from evaluation.grg_evaluator import GRGEvaluator
 
 logger = logging.getLogger("LoTSS-GRG-detect.train")
 
@@ -36,12 +36,23 @@ class GRGTrainer(DefaultTrainer):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "evaluation")
 
+        # Get annotations path from metadata (set by register_coco_instances)
+        metadata = MetadataCatalog.get(dataset_name)
+        annotations_path = metadata.json_file
+
         # For now we use COCOEvaluator; will be replaced with custom evaluator
-        return COCOEvaluator(
-            dataset_name,
-            output_dir=output_folder,
-            tasks=("bbox", "segm")
-        )
+        return DatasetEvaluators([
+            # COCOEvaluator(
+            #     dataset_name,
+            #     output_dir=output_folder,
+            #     tasks=("bbox", "segm")
+            # ),
+            GRGEvaluator(
+                coco_images=DatasetCatalog.get(dataset_name),
+                annotations_path=annotations_path,
+                score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
+            )
+        ])
     
     @classmethod
     def build_train_loader(cls, cfg):
