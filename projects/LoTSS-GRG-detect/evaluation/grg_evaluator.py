@@ -90,26 +90,31 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
             self._logger.warning("[GRGEvaluator] Did not receive valid predictions.")
             return {}
         
-        tp, fp, fn = self._gather_predictions()
+        tp_mask, fp_mask, fn_mask, tp_bbox, fp_bbox, fn_bbox = self._gather_predictions()
         
         # Compute metrics
         results = {
-            "accuracy": self._accuracy(tp, fp, fn),
-            "precision": self._precision(tp, fp),
-            "recall": self._recall(tp, fn)
+            "segm_accuracy": self._accuracy(tp_mask, fp_mask, fn_mask),
+            "segm_precision": self._precision(tp_mask, fp_mask),
+            "segm_recall": self._recall(tp_mask, fn_mask),
+            "bbox_accuracy": self._accuracy(tp_bbox, fp_bbox, fn_bbox),
+            "bbox_precision": self._precision(tp_bbox, fp_bbox),
+            "bbox_recall": self._recall(tp_bbox, fn_bbox)
         }
         
         # Log the results in a nice table format
         self._logger.info("GRG Evaluation Results:\n" + create_small_table(results))
-        
         return {
             "GRG": results
         }
 
     def _gather_predictions(self):
-        tp_list = []
-        fp_list = []
-        fn_list = []
+        tp_mask_list = []
+        fp_mask_list = []
+        fn_mask_list = []
+        tp_bbox_list = []
+        fp_bbox_list = []
+        fn_bbox_list = []
         
         # Create a mapping from image_id to image metadata
         # First load the image by id, then get the metadata from the coco annotations
@@ -122,69 +127,129 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
             image_id = prediction['image_id']
             image_metadata = image_id_to_metadata.get(image_id)
             
+            # Log a warning if the image_id from predictions is not found in the coco annotations
+            # This should not happen but better safe than sorry
             if image_metadata is None:
                 self._logger.warning(f"Image ID {image_id} not found in annotations")
                 continue
             
-            mask = self._get_mask_from_predictions(prediction)
+            # Get the predicted mask and bounding box for this image
+            valid_instances = self._get_valid_instances(prediction)
+            mask = self._get_mask_from_instances(valid_instances)
+            bbox = self._get_bbox_from_instances(valid_instances)
+
+            # Extract the GRG components and non-GRG components for this image
             grg_components = self._extract_gt_components(image_metadata)
             all_components = self._extract_all_components(image_metadata)
             non_grg_components = self._remove_grg_from_all_components(all_components, grg_components)
 
+            # Check if the GRG components are in the predicted mask and bounding box
             grg_components_in_mask = self._grg_components_are_in_mask(grg_components, mask)
+            grg_components_in_bbox = self._grg_components_are_in_bbox(grg_components, bbox)
+    
+            # Check if the non-GRG components are in the predicted mask
             non_grg_components_in_mask = self._non_grg_components_are_in_mask(non_grg_components, mask)
 
-            tp = self._tp(grg_components_in_mask, non_grg_components_in_mask)
-            fp = self._fp(grg_components_in_mask, non_grg_components_in_mask)
-            fn = self._fn(grg_components_in_mask, non_grg_components_in_mask)
+            # Calculate TP, FP, FN for both mask and bbox evaluations
+            tp_mask = self._tp(grg_components_in_mask, non_grg_components_in_mask)
+            fp_mask = self._fp(grg_components_in_mask, non_grg_components_in_mask)
+            fn_mask = self._fn(grg_components_in_mask, non_grg_components_in_mask)
+            tp_bbox = self._tp(grg_components_in_bbox, non_grg_components_in_mask)
+            fp_bbox = self._fp(grg_components_in_bbox, non_grg_components_in_mask)
+            fn_bbox = self._fn(grg_components_in_bbox, non_grg_components_in_mask)
 
-            tp_list.append(tp)
-            fp_list.append(fp)
-            fn_list.append(fn)
+            # Append results to lists for later aggregation
+            tp_mask_list.append(tp_mask)
+            fp_mask_list.append(fp_mask)
+            fn_mask_list.append(fn_mask)
+            tp_bbox_list.append(tp_bbox)
+            fp_bbox_list.append(fp_bbox)
+            fn_bbox_list.append(fn_bbox)
 
         # Convert to numpy arrays for easier calculation of metrics
         # and also convert the bool values to integers (1 for True, 0 for False)
         # for metric calculations
-        tp_list = np.array(tp_list).astype(int)
-        fp_list = np.array(fp_list).astype(int)
-        fn_list = np.array(fn_list).astype(int)
-        return tp_list, fp_list, fn_list
+        tp_mask_list = np.array(tp_mask_list).astype(int)
+        fp_mask_list = np.array(fp_mask_list).astype(int)
+        fn_mask_list = np.array(fn_mask_list).astype(int)
+        tp_bbox_list = np.array(tp_bbox_list).astype(int)
+        fp_bbox_list = np.array(fp_bbox_list).astype(int)
+        fn_bbox_list = np.array(fn_bbox_list).astype(int)
+        
+        return tp_mask_list, fp_mask_list, fn_mask_list, tp_bbox_list, fp_bbox_list, fn_bbox_list
     
-    def _get_mask_from_predictions(self, prediction):
+    def _get_valid_instances(self, prediction):
         """
-        Convert the model's output to a binary mask that can be used for evaluation.
-        Combines all predicted instance masks above the score threshold into a single binary mask.
+        Extract and filter instances from predictions.
+        Filters by score threshold and keeps only the highest-confidence prediction.
         
         Args:
             prediction (dict): A dict containing 'instances' with detectron2 Instances object
             
         Returns:
-            np.ndarray: Binary mask where 1 indicates predicted region, 0 background
+            Instances object or None: Filtered instances (max 1) or None if no valid predictions
         """
         instances = prediction.get('instances')
         
-        if instances is None:
-            # No instances at all - shouldn't happen but handle it
-            return np.zeros((300, 300), dtype=np.uint8)
-        
-        # Get image dimensions from the instances object
-        height = instances.image_size[0]
-        width = instances.image_size[1]
-        
-        if len(instances) == 0:
-            # No predictions - return empty mask with correct dimensions
-            return np.zeros((height, width), dtype=np.uint8)
+        if instances is None or len(instances) == 0:
+            return None
         
         # Filter instances by score threshold
         scores = instances.scores
         valid_indices = scores >= self._score_threshold
         
         if valid_indices.sum() == 0:
-            # No predictions above threshold
-            return np.zeros((height, width), dtype=np.uint8)
+            return None
         
         # Get valid instances
         valid_instances = instances[valid_indices]
+        
+        # Keep only the highest-confidence prediction
+        if len(valid_instances) > 1:
+            best_idx = valid_instances.scores.argmax()
+            valid_instances = valid_instances[best_idx:best_idx+1]
+        
+        return valid_instances
+    
+    def _get_bbox_from_instances(self, valid_instances):
+        """
+        Extract bounding box from valid instances.
+        
+        Args:
+            valid_instances: Filtered Instances object or None
+            
+        Returns:
+            list: A list of bounding boxes in the format [x1, y1, x2, y2]
+        """
+        if valid_instances is None:
+            return []
+        
+        # Extract bounding boxes
+        bboxes = []
+        if hasattr(valid_instances, 'pred_boxes'):
+            # pred_boxes.tensor gives us the tensor, take first (and only) box
+            box = valid_instances.pred_boxes.tensor[0].int().numpy()
+            bboxes.append(box)
+        
+        return bboxes
+    
+    def _get_mask_from_instances(self, valid_instances):
+        """
+        Convert valid instances to a binary mask that can be used for evaluation.
+        
+        Args:
+            valid_instances: Filtered Instances object or None
+            
+        Returns:
+            np.ndarray: Binary mask where 1 indicates predicted region, 0 background
+        """
+        if valid_instances is None:
+            # No valid instances - return empty mask with default dimensions
+            return np.zeros((300, 300), dtype=np.uint8)
+        
+        # Get image dimensions from the instances object
+        height = valid_instances.image_size[0]
+        width = valid_instances.image_size[1]
         
         # Initialize combined mask
         combined_mask = np.zeros((height, width), dtype=np.uint8)
@@ -192,8 +257,10 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
         # Combine all masks
         if hasattr(valid_instances, 'pred_masks'):
             # Instance segmentation: combine all predicted masks
-            for mask in valid_instances.pred_masks:
-                combined_mask = np.logical_or(combined_mask, mask.numpy())
+            # for mask in valid_instances.pred_masks:
+            #     combined_mask = np.logical_or(combined_mask, mask.numpy())
+            mask = valid_instances.pred_masks[0].numpy()
+            combined_mask = np.logical_or(combined_mask, mask)
         elif hasattr(valid_instances, 'pred_boxes'):
             # Detection only: use bounding boxes as masks
             for box in valid_instances.pred_boxes:
@@ -210,6 +277,23 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
             x, y = comp
             # Assuming mask is binary with 1 for predicted region and 0 for background
             if mask[int(y), int(x)] == 0:
+                return False
+        return True
+    
+    def _grg_components_are_in_bbox(self, grg_components: list, bbox: list):
+        """
+        Check if the given components (list of tuples) are within the predicted mask (2D numpy array).
+        """
+        for comp in grg_components:
+            x, y = comp
+            if bbox:
+                # Assuming bbox is a list of one bounding box
+                x1, y1, x2, y2 = bbox[0][0], bbox[0][1], bbox[0][2], bbox[0][3]
+                if (x1 <= x <= x2 and y1 <= y <= y2):
+                    # If the component is within the bounding box,
+                    # we can consider it as covered by the prediction,
+                    # even if it's not in the mask (for detection-only models)
+                    continue
                 return False
         return True
     
