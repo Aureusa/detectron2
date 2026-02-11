@@ -326,20 +326,20 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
         fn_sum = np.sum(fn)
         return tp_sum / (tp_sum + fn_sum) if (tp_sum + fn_sum) > 0 else 0.0
 
-    def _tp(self, grg_in_mask: bool, non_grg_in_mask: bool): # True Positives
+    def _tp(self, grg_in_mask_or_bbox: bool, non_grg_in_mask: bool): # True Positives
         """Region uniquely encompasses all GRG components and no non-GRG components"""
-        if grg_in_mask == True and non_grg_in_mask == False:
+        if grg_in_mask_or_bbox == True and non_grg_in_mask == False:
             return True
         return False
 
-    def _fp(self, grg_in_mask: bool, non_grg_in_mask: bool): # False Positives
+    def _fp(self, grg_in_mask_or_bbox: bool, non_grg_in_mask: bool): # False Positives
         """Region missing GRG components OR includes non-GRG components"""
-        if grg_in_mask == False or non_grg_in_mask == True:
+        if grg_in_mask_or_bbox == False or non_grg_in_mask == True:
             return True
         return False
 
-    def _fn(self, grg_in_mask: bool, non_grg_in_mask: bool): # False Negatives
-        """No region covering GRG components (should be: not grg_in_mask)"""
-        if grg_in_mask == False:
+    def _fn(self, grg_in_mask_or_bbox: bool, non_grg_in_mask: bool): # False Negatives
+        """No region covering GRG components (should be: not grg_in_mask_or_bbox)"""
+        if grg_in_mask_or_bbox == False:
             return True
         return False

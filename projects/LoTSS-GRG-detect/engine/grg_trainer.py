@@ -40,13 +40,12 @@ class GRGTrainer(DefaultTrainer):
         metadata = MetadataCatalog.get(dataset_name)
         annotations_path = metadata.json_file
 
-        # For now we use COCOEvaluator; will be replaced with custom evaluator
         return DatasetEvaluators([
-            # COCOEvaluator(
-            #     dataset_name,
-            #     output_dir=output_folder,
-            #     tasks=("bbox", "segm")
-            # ),
+            COCOEvaluator(
+                dataset_name,
+                output_dir=output_folder,
+                tasks=("bbox", "segm")
+            ),
             GRGEvaluator(
                 coco_images=DatasetCatalog.get(dataset_name),
                 annotations_path=annotations_path,
