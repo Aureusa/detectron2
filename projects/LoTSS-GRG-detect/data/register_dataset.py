@@ -5,22 +5,36 @@ from detectron2.structures import BoxMode
 import yaml
 import os
 import logging
+import json
+
 
 logger = logging.getLogger("LoTSS-GRG-detect.data.register_dataset")
 
 def load_coco_json_xyxy(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
     """
     Load COCO format JSON with XYXY bboxes instead of XYWH.
-    This is a wrapper around load_coco_json that fixes bbox_mode.
-    """
+    Also preserves custom metadata fields.
+    """    
     # Load using standard loader
     dataset_dicts = load_coco_json(json_file, image_root, dataset_name, extra_annotation_keys)
     
-    # Fix bbox_mode for all annotations
+    # Load the original JSON to get metadata
+    with open(json_file, 'r') as f:
+        coco_data = json.load(f)
+    
+    # Create a mapping from image_id to metadata
+    id_to_metadata = {img['id']: img.get('metadata', {}) for img in coco_data['images']}
+    
+    # Add metadata to each dataset_dict
     for dataset_dict in dataset_dicts:
+        # Fix bbox_mode for all annotations
         for anno in dataset_dict.get("annotations", []):
-            # Change from XYWH_ABS (which load_coco_json sets) to XYXY_ABS
             anno["bbox_mode"] = BoxMode.XYXY_ABS
+        
+        # Add metadata if available
+        img_id = dataset_dict['image_id']
+        if img_id in id_to_metadata:
+            dataset_dict['metadata'] = id_to_metadata[img_id]
     
     return dataset_dicts
 
