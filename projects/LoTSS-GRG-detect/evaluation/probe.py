@@ -33,7 +33,12 @@ class COCOProbe:
         including those that do not belong to the GRG according to the manual association.
         The number of radio components in the image is equal to the length of this list.
         """
-        return image_metadata.get('all_component_positions', [])
+        all_components = image_metadata.get('all_component_positions', [])
+        if not all_components:
+            all_components = image_metadata.get('positions', [])
+        if not all_components:
+            raise ValueError("No component positions found in image metadata.")
+        return all_components
     
     def _remove_grg_from_all_components(self, all_components: list, grg_components: list):
         """
