@@ -1,4 +1,4 @@
-_BASE_: "../../../configs/Base-RCNN-FPN.yaml"
+_BASE_: "../../../../configs/Base-RCNN-FPN.yaml"
 MODEL:
   WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
   MASK_ON: True
@@ -18,13 +18,15 @@ DATASETS:
   TEST: ("grg_val",)
   PRECOMPUTED_PROPOSAL_TOPK_TRAIN: 10000
   PRECOMPUTED_PROPOSAL_TOPK_TEST: 10000
+DATALOADER:
+  NUM_WORKERS: 4  # Adjust based on your CPU cores
 SOLVER:
-  IMS_PER_BATCH: 8  # Adjust based on your GPU memory
+  IMS_PER_BATCH: 16  # Adjust based on your GPU memory
   BASE_LR: 0.001
-  STEPS: (15000, 20000)
-  MAX_ITER: 25000
+  STEPS: (46800, 62400, 112000)  # Adjust based on your dataset size and desired schedule
+  MAX_ITER: 178000
   CHECKPOINT_PERIOD: 2500
-  WARMUP_ITERS: 500
+  WARMUP_ITERS: 1000
 INPUT:
   MIN_SIZE_TRAIN: (300,)  # Match your image size
   MAX_SIZE_TRAIN: 300
@@ -32,5 +34,5 @@ INPUT:
   MAX_SIZE_TEST: 300
   MASK_FORMAT: "bitmask"  # Use "bitmask" for RLE format annotations
 TEST:
-  EVAL_PERIOD: 1000  # Evaluate every 1000 iterations
-OUTPUT_DIR: "./output/grg_mask_rcnn"
+  EVAL_PERIOD: 10000  # Evaluate every 10000 iterations
+OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/grg_mask_rcnn"

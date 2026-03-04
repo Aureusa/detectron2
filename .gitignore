@@ -55,3 +55,7 @@ _darcs
 # slurm output
 *.out
 *.slurm
+
+# Remove slurm_output and results
+slurm_output
+results

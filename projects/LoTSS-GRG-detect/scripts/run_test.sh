@@ -5,11 +5,11 @@ set -e
 
 # Set project root
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$PROJECT_ROOT/scripts"
+cd "$PROJECT_ROOT/pipelines"
 
 # Defaults
-CONFIG="${PROJECT_ROOT}/configs/mask_rcnn_R_50_FPN_grg.yaml"
-DATASET_CONFIG="${PROJECT_ROOT}/config/dataset_test.yaml"
+CONFIG="${PROJECT_ROOT}/configs/model_configs/mask_rcnn_R_50_FPN_grg_improved.yaml"
+DATASET_CONFIG="${PROJECT_ROOT}/configs/dataset_configs/dataset_test.yaml"
 WEIGHTS=""
 OUTPUT_DIR=""
 SCORE_THRESHOLD=""

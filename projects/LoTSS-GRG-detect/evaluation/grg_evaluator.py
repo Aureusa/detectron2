@@ -1,6 +1,7 @@
 import sys
 import logging
 from pathlib import Path
+import copy
 
 # Add detectron2 to path (assumes detectron2 is in the parent directory structure)
 detectron2_root = Path(__file__).parent.parent.parent.parent
@@ -12,7 +13,7 @@ sys.path.insert(0, str(project_root))
 
 
 from detectron2.evaluation import DatasetEvaluator
-from detectron2.utils.logger import create_small_table
+from detectron2.utils.logger import create_small_table, setup_logger
 
 import numpy as np
 import torch
@@ -41,7 +42,7 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
         self.coco_images = coco_images
         self._cpu_device = torch.device("cpu")
         self._score_threshold = score_threshold
-        self._logger = logging.getLogger(__name__)
+        self._logger = setup_logger(name="LoTSS-GRG-detect.evaluation.GRGEvaluator", termcolor="magenta")
 
     def reset(self):
         """
@@ -111,9 +112,9 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
         
         # Log the results in a nice table format
         self._logger.info("GRG Evaluation Results:\n" + create_small_table(results))
-        return {
+        return copy.deepcopy({
             "GRG": results
-        }
+        })
 
     def _gather_predictions(self):
         tp_mask_list = []
@@ -137,10 +138,10 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
             # Log a warning if the image_id from predictions is not found in the coco annotations
             # This should not happen but better safe than sorry
             if image_metadata is None:
-                self._logger.warning(f"Image ID {image_id} not found in annotations")
+                self._logger.warning(f"Image ID {image_id} not found in COCO annotations. Skipping this prediction.")
                 continue
 
-            if image_metadata.get("grg_in_sample", True) == False:
+            if not image_metadata.get("grg_in_sample", True):
                 # For samples where there is no known grg (refer to as negative samples),
                 # we expect no predictions.
                 # If there are predictions, they are false positives.
@@ -161,6 +162,7 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
             # Extract the GRG components and non-GRG components for this image
             grg_components = self._extract_gt_components(image_metadata)
             all_components = self._extract_all_components(image_metadata)
+            
             # Convert grg_components and all_components from dict to list if they are dicts
             if isinstance(grg_components, dict):
                 grg_components = list(grg_components.values())

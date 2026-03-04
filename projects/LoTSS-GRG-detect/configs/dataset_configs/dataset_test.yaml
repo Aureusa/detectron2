@@ -1,16 +1,16 @@
 # Dataset configuration for GRG detection
 DATASET_NAME: "grg"
-DATA_ROOT: "/home/s4861264/project_data/split"
+DATA_ROOT: "/home/s4861264/project_data/big-search-dataset"
 
 TRAIN:
-  EXISTS: True
+  EXISTS: False
   NAME: "train"
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"
   PROPOSALS: "proposals"
 
 VALIDATION:
-  EXISTS: True
+  EXISTS: False
   NAME: "val"
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"
@@ -18,7 +18,7 @@ VALIDATION:
 
 TEST:
   EXISTS: True
-  NAME: "test"
+  NAME: ""
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"
   PROPOSALS: "proposals"

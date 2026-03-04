@@ -23,13 +23,14 @@ import torch
 from detectron2.engine import default_argument_parser, default_setup, launch
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
+from detectron2.utils.logger import setup_logger
 
 # Import custom modules from parent directory
 sys.path.insert(0, str(project_root))
 from data.register_dataset import main as register_datasets
 from engine.grg_trainer import GRGTrainer
 
-logger = logging.getLogger("LoTSS-GRG-detect.train")
+logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")
 
 
 def setup(args):
@@ -39,21 +40,16 @@ def setup(args):
     cfg = get_cfg()
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
-    
+    if args.dataset_config:
+        dataset_config_path = os.path.normpath(args.dataset_config)
+    else:
+        raise ValueError("Dataset config file must be provided with --dataset-config")
     # Ensure output directory exists
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
     default_setup(cfg, args)
     
-    # Register datasets
-    dataset_config_path = os.path.join(
-        os.path.dirname(args.config_file), 
-        "..", 
-        "config", 
-        "dataset.yaml"
-    )
-    dataset_config_path = os.path.normpath(dataset_config_path)
-    
+    # Register datasets   
     logger.info(f"Registering datasets from: {dataset_config_path}")
     registered = register_datasets(dataset_config_path)
     logger.info(f"Registered datasets: {registered}")
@@ -108,6 +104,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = default_argument_parser()
+    parser.add_argument(
+        "--dataset-config",
+        default="",
+        metavar="FILE",
+        help="path to dataset config file (YAML) that defines the datasets and their paths",
+    )
     args = parser.parse_args()
     
     # Set up logging

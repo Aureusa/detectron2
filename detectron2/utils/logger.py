@@ -46,6 +46,7 @@ def setup_logger(
     *,
     color=True,
     name="detectron2",
+    termcolor="green",
     abbrev_name=None,
     enable_propagation: bool = False,
     configure_stdout: bool = True
@@ -64,6 +65,10 @@ def setup_logger(
             modules unchanged.
         enable_propagation (bool): whether to propagate logs to the parent logger.
         configure_stdout (bool): whether to configure logging to stdout.
+        termcolor (str): Available text colors:
+        black, red, green, yellow, blue, magenta, cyan, white,
+        light_grey, dark_grey, light_red, light_green, light_yellow, light_blue,
+        light_magenta, light_cyan.
 
 
     Returns:
@@ -85,7 +90,7 @@ def setup_logger(
         ch.setLevel(logging.DEBUG)
         if color:
             formatter = _ColorfulFormatter(
-                colored("[%(asctime)s %(name)s]: ", "green") + "%(message)s",
+                colored("[%(asctime)s %(name)s]: ", termcolor) + "%(message)s",
                 datefmt="%m/%d %H:%M:%S",
                 root_name=name,
                 abbrev_name=str(abbrev_name),
