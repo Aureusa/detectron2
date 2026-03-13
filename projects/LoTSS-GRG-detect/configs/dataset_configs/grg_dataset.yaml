@@ -13,6 +13,7 @@
 #     └── proposals/
 #     └── annotations.json
 DATA_ROOT: "/home/s4861264/project_data/full-dataset"
+TYPE: "standard"
 DATASET_NAME: "grg_dataset"
 TRAIN:
   EXISTS: True

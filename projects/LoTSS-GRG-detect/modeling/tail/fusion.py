@@ -5,63 +5,99 @@ from ..vanila import MHAttention
 
 
 class AttentionFusionModule(nn.Module):
-    """An attention-based fusion module to combine ROI features and the PhysicsFAN features."""
+    """
+    Cross-attention fusion where each physics component queries the ROI spatial tokens.
+
+    Q = physics component embeddings  (B*P, C_comp, D)
+    K = V = ROI spatial patch tokens  (B*P, H*W, D)
+
+    This is strictly intra-proposal: proposals are batched as B*P so attention
+    never crosses proposal boundaries. No pooling is done, so the full spatial
+    detail of each RoI map is available to each component.
+
+    Output: (B, P, C_comp, D) — same shape as PhysicsFAN output, suitable for
+    the per-component membership/validity heads.
+    """
+
     def __init__(self, roi_feature_dim, physics_fan_feature_dim, dropout=0.0, num_heads=8):
         super().__init__()
-        self.dim_align = nn.Linear(roi_feature_dim, physics_fan_feature_dim)
+        # Project ROI channels to physics embedding dim so Q and K share the same space.
+        self.roi_proj = nn.Linear(roi_feature_dim, physics_fan_feature_dim)
         self.attention = MHAttention(physics_fan_feature_dim, num_heads, dropout)
 
     def forward(self, roi_features, physics_fan_features):
-        # Align the dimensions of ROI features to match PhysicsFAN features
-        aligned_roi_features = self.dim_align(roi_features) # (B, P, physics_fan_feature_dim)
-
         physics_feats, membership = self._unpack_physics_fan_features(
             physics_fan_features
-        )  # (B, P, C, physics_fan_feature_dim), (B, P, C)
+        )  # (B, P, C_comp, D), (B, P, C_comp)
+        bsz, proposals_per_image, num_components, feat_dim = physics_feats.shape
+        expected_n = bsz * proposals_per_image
 
-        B, P, C, D = physics_feats.shape
+        # --- Build ROI spatial tokens (no pooling) ---
+        # roi_features: (N, roi_dim, H, W)  with N == B*P
+        if roi_features.dim() != 4 or roi_features.shape[0] != expected_n:
+            raise ValueError(
+                f"Expected roi_features shape (B*P, C, H, W)=({expected_n}, *, *, *), "
+                f"got {tuple(roi_features.shape)}."
+            )
+        n, c, h, w = roi_features.shape
+        # (N, C, H, W) -> (N, H*W, C)
+        roi_spatial = roi_features.permute(0, 2, 3, 1).reshape(n, h * w, c)
+        # Project to physics embedding dim: (N, H*W, D)
+        roi_spatial = self.roi_proj(roi_spatial)
 
-        # Here the Q/K/V are as follows:
-        # Q: ROI features (aligned to physics_fan_feature_dim)
-        # K: PhysicsFAN features
-        # V: PhysicsFAN features (V=K)
-        query = aligned_roi_features.reshape(B * P, 1, D) # (B*P, 1, physics_fan_feature_dim)
-        key = physics_feats.reshape(B * P, C, D) # (B*P, C, physics_fan_feature_dim)
-        membership = membership.reshape(B * P, C) # (B*P, C)
+        # --- Cross-attention: component queries attend to spatial ROI keys ---
+        # Q: (N, C_comp, D)  K=V: (N, H*W, D)
+        query = physics_feats.reshape(expected_n, num_components, feat_dim)
+        key = roi_spatial  # (N, H*W, D)
 
         attn_output, attn_scores = self.attention(
-            query, key, key,
-            key_padding_mask=~membership.bool() # Mask out components not in the proposal
-        ) # (B*P, 1, physics_fan_feature_dim)
-        
-        # Reshape attn_output back to (B, P, physics_fan_feature_dim)
-        attn_output = attn_output.squeeze(1)  # (B*P, D)
-        attn_output = attn_output.reshape(B, P, D) # (B, P, physics_fan_feature_dim)
-        return attn_output, attn_scores
-    
+            query, key, key
+            # No key_padding_mask needed: all spatial positions are valid.
+        )  # (N, C_comp, D)
+
+        # Add spatial context back to component features (residual), re-apply membership mask.
+        fused = physics_feats + attn_output.reshape(bsz, proposals_per_image, num_components, feat_dim)
+        fused = fused * membership.unsqueeze(-1).float()
+        return fused, attn_scores
+
     def _unpack_physics_fan_features(self, physics_fan_features):
-        physics_attended_features = physics_fan_features["attention_features"] # (B, P, C, physics_fan_feature_dim)
-        membership_matrix = physics_fan_features["membership_matrix"] # (B, P, C)
+        physics_attended_features = physics_fan_features["attention_features"]  # (B, P, C, D)
+        membership_matrix = physics_fan_features["membership_matrix"]  # (B, P, C)
         return physics_attended_features, membership_matrix
-    
+
 
 class ConcatenationFusionModule(nn.Module):
-    """A simple fusion module that concatenates ROI features and PhysicsFAN features."""
-    def __init__(self):
+    """
+    Concatenation fusion: for each component, concatenates the ROI spatially-averaged
+    token (per-proposal) with the PhysicsFAN component embedding.
+
+    Note: unlike AttentionFusionModule this does average-pool the spatial ROI map,
+    since concatenation cannot operate across a sequence of H*W tokens per component.
+    """
+
+    def __init__(self, roi_feature_dim, physics_fan_feature_dim):
         super().__init__()
+        self.roi_proj = nn.Linear(roi_feature_dim, physics_fan_feature_dim)
 
     def forward(self, roi_features, physics_fan_features):
-        physics_feats = physics_fan_features["attention_features"] # (B, P, C, physics_fan_feature_dim)
+        physics_feats = physics_fan_features["attention_features"]  # (B, P, C, D)
+        bsz, proposals_per_image, num_components, _ = physics_feats.shape
+        expected_n = bsz * proposals_per_image
 
-        # ROI features: (B, P, roi_feature_dim)
-        # PhysicsFAN features: (B, P, C, physics_fan_feature_dim)
-        # We will concatenate along the feature dimension, so we need to reshape ROI features to match the component dimension
-        B, P, roi_dim = roi_features.shape
-        _, _, C, physics_dim = physics_feats.shape
-        roi_features_expanded = roi_features.unsqueeze(2).expand(B, P, C, roi_dim) # (B, P, C, roi_feature_dim)
-        fused_features = torch.cat([roi_features_expanded, physics_feats], dim=-1) # (B, P, C, roi_feature_dim + physics_fan_feature_dim)
+        if roi_features.dim() != 4 or roi_features.shape[0] != expected_n:
+            raise ValueError(
+                f"Expected roi_features (B*P, C, H, W)=({expected_n}, *, *, *), "
+                f"got {tuple(roi_features.shape)}."
+            )
+        # Pool to (N, roi_dim) then project to (B, P, D)
+        roi_token = roi_features.mean(dim=[2, 3])  # (N, roi_dim)
+        roi_token = self.roi_proj(roi_token)  # (N, D)
+        roi_token = roi_token.view(bsz, proposals_per_image, 1, -1)  # (B, P, 1, D)
+        roi_expanded = roi_token.expand(bsz, proposals_per_image, num_components, -1)  # (B, P, C, D)
+
+        fused_features = torch.cat([roi_expanded, physics_feats], dim=-1)  # (B, P, C, 2D)
         return fused_features
-    
+
 
 def build_fusion_module(cfg, roi_feature_dim, physics_fan_feature_dim):
     if cfg.MODEL.FUSION_MODULE.TYPE == "AttentionFusionModule":
@@ -72,6 +108,9 @@ def build_fusion_module(cfg, roi_feature_dim, physics_fan_feature_dim):
             num_heads=cfg.MODEL.FUSION_MODULE.NUM_HEADS,
         )
     elif cfg.MODEL.FUSION_MODULE.TYPE == "Concatenation":
-        return ConcatenationFusionModule()
+        return ConcatenationFusionModule(
+            roi_feature_dim=roi_feature_dim,
+            physics_fan_feature_dim=physics_fan_feature_dim,
+        )
     else:
         raise ValueError(f"Unknown fusion module type: {cfg.MODEL.FUSION_MODULE.TYPE}. Supported types: 'AttentionFusionModule', 'Concatenation'")

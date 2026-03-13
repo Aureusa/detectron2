@@ -31,14 +31,12 @@ class ProposalValidityHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._pool(x)  # (N, F+D)
-        # x: (N, K) -> logits: (N,)
+        # x: (N, K) proposal-level context vector -> logits: (N,)
+        if x.dim() != 2:
+            raise ValueError(
+                f"ProposalValidityHead expects (N, K), got shape {tuple(x.shape)}"
+            )
         return self.net(x).squeeze(-1)
-
-    def _pool(self, x: torch.Tensor):
-        # Simple global average pooling over components
-        glob_avg = x.mean(dim=1)
-        return glob_avg
 
 
 class PhysicsAwareHeads(nn.Module):
@@ -91,9 +89,12 @@ class PhysicsAwareHeads(nn.Module):
     def _get_component_mask(
         self,
         proposals: List[Instances],
+        targets: Optional[List[Instances]],
         shape: Tuple[int, int],
         device: torch.device,
     ) -> torch.Tensor:
+        if targets is not None and len(targets) > 0 and targets[0].has("component_mask"):
+            return torch.cat([t.component_mask.to(device) for t in targets], dim=0).bool()
         if len(proposals) == 0:
             return torch.ones(shape, dtype=torch.bool, device=device)
         if proposals[0].has("component_mask"):
@@ -106,19 +107,24 @@ class PhysicsAwareHeads(nn.Module):
         proposal_validity_logits: torch.Tensor,
         component_mask: torch.Tensor,
         proposals: List[Instances],
+        targets: Optional[List[Instances]],
     ) -> Dict[str, torch.Tensor]:
-        if len(proposals) == 0:
+        supervision = targets if (targets is not None and len(targets) > 0) else proposals
+
+        if len(supervision) == 0:
             return {}
-        if not proposals[0].has("gt_component_membership"):
+        if not supervision[0].has("gt_component_membership"):
             return {}
 
         gt_membership = torch.cat(
-            [inst.gt_component_membership.to(membership_logits.device) for inst in proposals], dim=0
+            [self._to_tensor(inst.gt_component_membership, membership_logits.device) for inst in supervision],
+            dim=0,
         ).float()
 
-        if proposals[0].has("gt_proposal_validity"):
+        if supervision[0].has("gt_proposal_validity"):
             gt_validity = torch.cat(
-                [inst.gt_proposal_validity.to(proposal_validity_logits.device) for inst in proposals], dim=0
+                [self._to_tensor(inst.gt_proposal_validity, proposal_validity_logits.device) for inst in supervision],
+                dim=0,
             ).float()
         else:
             gt_validity = torch.ones_like(proposal_validity_logits)
@@ -139,6 +145,14 @@ class PhysicsAwareHeads(nn.Module):
             "loss_membership": member_loss * self.membership_loss_weight,
             "loss_proposal_validity": proposal_loss * self.proposal_loss_weight,
         }
+
+    @staticmethod
+    def _to_tensor(value, device: torch.device) -> torch.Tensor:
+        if hasattr(value, "tensor"):
+            return value.tensor.to(device)
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        return torch.as_tensor(value, dtype=torch.float32, device=device)
 
     def _attach_predictions(
         self,
@@ -169,6 +183,7 @@ class PhysicsAwareHeads(nn.Module):
 
         component_mask = self._get_component_mask(
             proposals=proposals,
+            targets=targets,
             shape=x.shape[:2],
             device=x.device,
         )
@@ -176,6 +191,9 @@ class PhysicsAwareHeads(nn.Module):
         membership_logits = self.membership_head(x)
         membership_prob = torch.sigmoid(membership_logits) * component_mask.float()
 
+        # Build a proposal-level context vector by a masked, membership-weighted
+        # aggregation over components. This keeps a fixed-size representation (N, K)
+        # and avoids mixing information across proposals.
         denom = membership_prob.sum(dim=1, keepdim=True).clamp_min(1e-6)
         proposal_context = (x * membership_prob.unsqueeze(-1)).sum(dim=1) / denom
 
@@ -187,6 +205,7 @@ class PhysicsAwareHeads(nn.Module):
                 proposal_validity_logits=proposal_validity_logits,
                 component_mask=component_mask,
                 proposals=proposals,
+                targets=targets,
             )
             return proposals, losses
 

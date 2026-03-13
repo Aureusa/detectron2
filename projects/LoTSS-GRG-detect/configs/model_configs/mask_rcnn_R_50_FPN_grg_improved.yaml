@@ -20,6 +20,8 @@ DATASETS:
   TEST: ("grg_val",)
   PRECOMPUTED_PROPOSAL_TOPK_TRAIN: 10000
   PRECOMPUTED_PROPOSAL_TOPK_TEST: 10000
+TRAINER:
+  NAME: "GRGTrainer"
 DATALOADER:
   NUM_WORKERS: 4  # Adjust based on your CPU cores
 SOLVER:
@@ -37,4 +39,4 @@ INPUT:
   MASK_FORMAT: "bitmask"  # Use "bitmask" for RLE format annotations
 TEST:
   EVAL_PERIOD: 10000  # Evaluate every 10000 iterations
-OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/grg_mask_rcnn_improved"
+OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/grg_mask_rcnn_improved_3to1"

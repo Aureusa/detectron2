@@ -1,24 +1,24 @@
 # Dataset configuration for GRG detection
-DATASET_NAME: "grg"
-TYPE: "standard"
-DATA_ROOT: "/home/s4861264/project_data/big-search-dataset"
+DATASET_NAME: "b2s"
+TYPE: "b2s"
+DATA_ROOT: "/home/s4861264/project_data/b2s_dataset"
 
 TRAIN:
-  EXISTS: False
-  NAME: "train"
+  EXISTS: True
+  NAME: ""
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"
   PROPOSALS: "proposals"
 
 VALIDATION:
   EXISTS: False
-  NAME: "val"
+  NAME: ""
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"
   PROPOSALS: "proposals"
 
 TEST:
-  EXISTS: True
+  EXISTS: False
   NAME: ""
   ANNOTATIONS: "annotations.json"
   IMAGES: "images"

@@ -21,7 +21,7 @@ from ..roi_heads import build_roi_align, build_physics_heads
 
 
 @META_ARCH_REGISTRY.register()
-class TailedRCNN(GeneralizedRCNN):
+class TailedRCNN(nn.Module):
     @configurable
     def __init__(
         self,
@@ -48,12 +48,10 @@ class TailedRCNN(GeneralizedRCNN):
             input_format: describe the meaning of channels of input. Needed by visualization
             vis_period: the period to run visualization. Set to 0 to disable.
         """
+        # Initialize Detectron2 base fields (backbone, normalization buffers, etc.)
+        # using the same configurable path as GeneralizedRCNN.
         super().__init__()
         self.backbone = backbone
-        self.physics_fan = physics_fan
-        self.fusion_module = fusion_module
-        self.roi_align = roi_align
-        self.heads = heads
 
         self.input_format = input_format
         self.vis_period = vis_period
@@ -65,6 +63,11 @@ class TailedRCNN(GeneralizedRCNN):
         assert (
             self.pixel_mean.shape == self.pixel_std.shape
         ), f"{self.pixel_mean} and {self.pixel_std} have different shapes!"
+
+        self.physics_fan = physics_fan
+        self.fusion_module = fusion_module
+        self.roi_align = roi_align
+        self.heads = heads
 
     @classmethod
     def from_config(cls, cfg):
@@ -173,10 +176,10 @@ class TailedRCNN(GeneralizedRCNN):
             return self.inference(batched_inputs)
 
         images = self.preprocess_image(batched_inputs)
-        if "instances" in batched_inputs[0]:
-            gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+        if "target" in batched_inputs[0]:
+            gt_targets = [x["target"].to(self.device) for x in batched_inputs]
         else:
-            gt_instances = None
+            gt_targets = None
 
         # Extract features using the backbone
         features = self.backbone(images.tensor)
@@ -195,9 +198,9 @@ class TailedRCNN(GeneralizedRCNN):
         fan_features = self.physics_fan(phys_features)
 
         # Fuse ROI features and PhysicsFAN features before feeding into the heads
-        fused_features = self.fusion_module(roi_features, fan_features)
+        fused_features, fused_features_attn_scores = self.fusion_module(roi_features, fan_features)
 
-        _, detector_losses = self.heads(fused_features, proposals, gt_instances)
+        _, detector_losses = self.heads(fused_features, proposals, gt_targets)
         if self.vis_period > 0:
             storage = get_event_storage()
             if storage.iter % self.vis_period == 0:
@@ -247,7 +250,7 @@ class TailedRCNN(GeneralizedRCNN):
                 raise NotImplementedError("Physics features are expected in the input for training. Please ensure that the dataset mapper is providing them.")
             fan_features = self.physics_fan(phys_features)
             
-            fused_features = self.fusion_module(roi_features, fan_features)
+            fused_features, fused_features_attn_scores = self.fusion_module(roi_features, fan_features)
 
             results, _ = self.heads(fused_features, proposals, None)
         else:

@@ -10,11 +10,24 @@ import json
 
 logger = logging.getLogger("LoTSS-GRG-detect.data.register_dataset")
 
-def load_coco_json_xyxy(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
+def load_coco_json_xyxy(
+        json_file,
+        image_root,
+        dataset_name=None,
+        ds_type="b2s",
+        extra_annotation_keys=["gt_proposal_validity", "gt_component_membership"]
+    ):
     """
     Load COCO format JSON with XYXY bboxes instead of XYWH.
     Also preserves custom metadata fields.
-    """    
+    """
+    if ds_type == "standard":
+        extra_annotation_keys = []  # No extra keys for standard dataset
+    elif ds_type == "b2s":
+        extra_annotation_keys = ["gt_proposal_validity", "gt_component_membership"]
+    else:
+        raise ValueError(f"Unknown dataset type: {ds_type}, must be 'standard' or 'b2s'")
+    
     # Load using standard loader
     dataset_dicts = load_coco_json(json_file, image_root, dataset_name, extra_annotation_keys)
     
@@ -28,8 +41,14 @@ def load_coco_json_xyxy(json_file, image_root, dataset_name=None, extra_annotati
     # Add metadata to each dataset_dict
     for dataset_dict in dataset_dicts:
         # Fix bbox_mode for all annotations
-        for anno in dataset_dict.get("annotations", []):
-            anno["bbox_mode"] = BoxMode.XYXY_ABS
+        if ds_type == "standard":
+            for anno in dataset_dict.get("annotations", []):
+                anno["bbox_mode"] = BoxMode.XYXY_ABS
+        elif ds_type == "b2s":
+            # For B2S dataset, we remove 'bbox_mode' to avoid confusion since we use custom proposals
+            for anno in dataset_dict.get("annotations", []):
+                if "bbox_mode" in anno:
+                    del anno["bbox_mode"]
         
         # Add metadata if available
         img_id = dataset_dict['image_id']
@@ -38,7 +57,7 @@ def load_coco_json_xyxy(json_file, image_root, dataset_name=None, extra_annotati
     
     return dataset_dicts
 
-def register_dataset(dataset: dict, dataset_name: str, data_root: str):
+def register_dataset(dataset: dict, dataset_name: str, data_root: str, ds_type: str):
     split_name = dataset.get('NAME', 'default') # train, val, test
     dataset_name = f"{dataset_name}_{split_name}"
     
@@ -48,12 +67,14 @@ def register_dataset(dataset: dict, dataset_name: str, data_root: str):
     logger.info(f"Registering dataset: {dataset_name}")
     logger.info(f"  Annotations: {ann_file}")
     logger.info(f"  Images dir: {img_dir}")
-    logger.info(f"  BBox format: XYXY_ABS")
+    if ds_type == "standard":
+        logger.info(f"  BBox format: XYXY_ABS")
+    logger.info(f"  Dataset type: {ds_type}")
     
     # Register with custom loader that handles XYXY bboxes
     DatasetCatalog.register(
         dataset_name,
-        lambda: load_coco_json_xyxy(ann_file, img_dir, dataset_name)
+        lambda: load_coco_json_xyxy(ann_file, img_dir, dataset_name, ds_type)
     )
     
     # Set metadata
@@ -61,7 +82,7 @@ def register_dataset(dataset: dict, dataset_name: str, data_root: str):
         json_file=ann_file,
         image_root=img_dir,
         evaluator_type="coco",
-        thing_classes=["GRG"]
+        thing_classes=["radio_source"] if ds_type == "b2s" else ["GRG"]
     )
     
     logger.info(f"Successfully registered dataset: {dataset_name}")
@@ -85,26 +106,28 @@ def main(cfg_filepath: str):
     train_dataset = dataset_cfg.get('TRAIN', {})
     val_dataset = dataset_cfg.get('VALIDATION', {})
     test_dataset = dataset_cfg.get('TEST', {})
+    ds_type = dataset_cfg.get('TYPE', 'standard')
+    logger.info(f"Dataset type: {ds_type}")
 
     registered_datasets = []
     
     if train_dataset.get('EXISTS', False):
         logger.info("Registering training dataset...")
-        name = register_dataset(train_dataset, dataset_name, data_root)
+        name = register_dataset(train_dataset, dataset_name, data_root, ds_type)
         registered_datasets.append(name)
     else:
         logger.warning("Training dataset not configured or does not exist")
         
     if val_dataset.get('EXISTS', False):
         logger.info("Registering validation dataset...")
-        name = register_dataset(val_dataset, dataset_name, data_root)
+        name = register_dataset(val_dataset, dataset_name, data_root, ds_type)
         registered_datasets.append(name)
     else:
         logger.warning("Validation dataset not configured or does not exist")
         
     if test_dataset.get('EXISTS', False):
         logger.info("Registering test dataset...")
-        name = register_dataset(test_dataset, dataset_name, data_root)
+        name = register_dataset(test_dataset, dataset_name, data_root, ds_type)
         registered_datasets.append(name)
     else:
         logger.warning("Test dataset not configured or does not exist")

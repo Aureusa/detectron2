@@ -69,13 +69,15 @@ class PhysicsFAN(nn.Module):
         features = self._preprocess_features(features)  # Pre-process the input features
 
         embedded_features = self.embedding_mlp(features)  # (B, P, C, embedding_dim) - Batch size, P proposals, C components, embedding_dim features
-        embedded_features *= membership_matrix.unsqueeze(-1).float()  # Mask out features for components not in the proposal
+        unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
+        embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
 
         attended_features, attn_scores = self.attention(
             embedded_features,
             embedded_features,
             embedded_features,
-            key_padding_mask=~membership_matrix.bool()
+            key_padding_mask=~membership_matrix.bool(),
+            output_mask=membership_matrix.bool(),
         )  # Self-attention across components (B, P, C, embedding_dim)
         return {
             "attention_features": attended_features,
@@ -92,7 +94,13 @@ class PhysicsFAN(nn.Module):
         :param features: A list of physics feature tensors for each component, each of shape (P, C, num_physics_features).
         :return: A list of processed feature tensors for each component, each of shape (P, C, embedding_dim)
         """
-        raise NotImplementedError("Feature pre-processing logic needs to be implemented based on the specific physics features used and unpacking strategy.")
+        # features contains list of Instances with a field component_features of shape
+        # (P, C, num_physics_features)
+        # We are batching the features, so we need to stack them into a tensor of shape
+        # (B, P, C, num_physics_features)
+        # The features are already tensors on the right device
+        physical_features = torch.stack([feat.component_features for feat in features], dim=0)  # (B, P, C, num_physics_features)
+        return physical_features
     
     def _binary_membership_matrix(self, features):
         """
@@ -101,8 +109,11 @@ class PhysicsFAN(nn.Module):
         :param features: A list of physics feature tensors for each component, each of shape (P, C, num_physics_features).
         :return: A binary membership matrix of shape (B, P, C), where B is the batch size, P is the number of proposals, and C is the number of components.
         """
-        raise NotImplementedError("Membership matrix creation logic needs to be implemented based on how the presence of components in proposals is determined from the features.")
-    
+        # features contain list of Instances with a field component_mask of shape (P, C)
+        # We are batching the features, so we need to stack them into a tensor of shape (B, P, C)
+        # The features are already tensors on the right device
+        membership_matrix = torch.stack([feat.component_mask for feat in features], dim=0)  # (B, P, C)
+        return membership_matrix
 
 def build_physics_fan(cfg):
     return PhysicsFAN(**PhysicsFAN.from_config(cfg))

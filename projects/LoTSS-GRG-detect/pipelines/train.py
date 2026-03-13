@@ -27,8 +27,12 @@ from detectron2.utils.logger import setup_logger
 
 # Import custom modules from parent directory
 sys.path.insert(0, str(project_root))
+from configs.custom_config import add_lotss_grg_config
 from data.register_dataset import main as register_datasets
 from engine.grg_trainer import GRGTrainer
+from engine.b2s_trainer import B2STrainer
+
+from modeling.meta_arch import TailedRCNN
 
 logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")
 
@@ -38,6 +42,7 @@ def setup(args):
     Create config and perform basic setups.
     """
     cfg = get_cfg()
+    add_lotss_grg_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     if args.dataset_config:
@@ -62,10 +67,7 @@ def setup(args):
             split,
             "proposals"
         )
-        MetadataCatalog.get(dataset_name).set(
-            thing_classes=["GRG"],
-            proposal_dir=proposal_dir
-        )
+        MetadataCatalog.get(dataset_name).set(proposal_dir=proposal_dir)
         logger.info(f"Set proposal_dir for {dataset_name}: {proposal_dir}")
     
     return cfg
@@ -90,14 +92,21 @@ def main(args):
     logger.info(f"  Precomputed proposals: {cfg.MODEL.LOAD_PROPOSALS}")
     logger.info(f"  Proposal top-k (train): {cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN}")
     logger.info(f"  Proposal top-k (test): {cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST}")
+
+    if cfg.TRAINER.NAME == "GRGTrainer":
+        TrainerClass = GRGTrainer
+    elif cfg.TRAINER.NAME == "B2STrainer":
+        TrainerClass = B2STrainer
+    else:
+        raise ValueError(f"Unknown trainer specified in config: {cfg.TRAINER.NAME}, expected 'GRGTrainer' or 'B2STrainer'")
     
     if args.eval_only:
-        model = GRGTrainer.build_model(cfg)
-        GRGTrainer.test(cfg, model)
+        model = TrainerClass.build_model(cfg)
+        TrainerClass.test(cfg, model)
         return
     
     # Start training
-    trainer = GRGTrainer(cfg)
+    trainer = TrainerClass(cfg)
     trainer.resume_or_load(resume=args.resume)
     return trainer.train()
 

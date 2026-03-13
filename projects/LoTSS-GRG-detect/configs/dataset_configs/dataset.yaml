@@ -1,11 +1,12 @@
 # Dataset configuration for GRG detection
 DATASET_NAME: "grg"
+TYPE: "standard"
 DATA_ROOT: "/home/s4861264/project_data/big-dataset-class-ratio-5-split"
 
 TRAIN:
   EXISTS: True
   NAME: "train"
-  ANNOTATIONS: "annotations.json"
+  ANNOTATIONS: "annotations_cr_3to1.json" # Changed from 5:1 to 3:1
   IMAGES: "images"
   PROPOSALS: "proposals"
 
