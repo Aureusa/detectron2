@@ -48,3 +48,11 @@ def add_lotss_grg_config(cfg):
 
     cfg.TRAINER = CN()
     cfg.TRAINER.NAME = "GRGTrainer"
+
+    cfg.DATASETS = CN()
+    cfg.DATASETS.POSITIVE_FRACTION = 0.20  # Fraction of positive samples in each batch pos:neg - 1:5
+    cfg.DATASETS.TRAIN = ("",)
+    cfg.DATASETS.TEST = ("",)
+    cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN = 100000
+    cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST = 100000
+    

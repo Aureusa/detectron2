@@ -110,12 +110,14 @@ class B2SDatasetMapper(DatasetMapper):
         
         # Set proposal_topk from config if not already set by parent
         # This ensures we load proposals even when MODEL.LOAD_PROPOSALS is False
-        if self.proposal_topk is None:
-            self.proposal_topk = (
-                cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN
-                if is_train
-                else cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST
-            )
+        # if self.proposal_topk is None:
+        #     self.proposal_topk = (
+        #         cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN
+        #         if is_train
+        #         else cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST
+        #     )
+
+        self.positive_fraction = cfg.DATASETS.POSITIVE_FRACTION if hasattr(cfg.DATASETS, "POSITIVE_FRACTION") else 0.20
         
     def __call__(self, dataset_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -142,7 +144,7 @@ class B2SDatasetMapper(DatasetMapper):
                 # Load NPZ file
                 npz_data = np.load(proposal_file)
 
-                # Extract boxes, physical features and masks
+                # # Extract boxes, physical features and masks
                 boxes = npz_data['boxes']  # Shape: (N, 4), format: [x1, y1, x2, y2]
                 features = npz_data['features']  # Shape: (N, C, F) features per proposal-component
                 masks = npz_data['within_proposal_mask']  # Shape: (N, C), masks for each proposal-component
@@ -164,9 +166,13 @@ class B2SDatasetMapper(DatasetMapper):
                 # Build a separate target Instances for proposal-level supervision
                 target = self._build_membership_validity_target((h, w), masks, raw_annotations)
 
-                dataset_dict["proposals"] = proposals
-                dataset_dict["physics_features"] = physical_features
-                dataset_dict["target"] = target
+                sampled_proposals, sampled_physical_features, sampled_target = self._sample_positive_proposals(
+                    proposals, physical_features, target
+                )
+
+                dataset_dict["proposals"] = sampled_proposals
+                dataset_dict["physics_features"] = sampled_physical_features
+                dataset_dict["target"] = sampled_target
 
             except Exception as e:
                 # Log error but don't crash - training can continue without proposals
@@ -175,6 +181,54 @@ class B2SDatasetMapper(DatasetMapper):
                 logger.warning(f"Failed to load proposals from {proposal_file}: {e}")
         
         return dataset_dict
+    
+    def _sample_positive_proposals(self, proposals: Instances, physical_features: Instances, target: Instances):
+
+        if not self.is_train:
+            return proposals, physical_features, target
+        
+        if self.positive_fraction is None:
+            return proposals, physical_features, target
+
+        if self.positive_fraction <= 0 or self.positive_fraction >= 1:
+            return proposals, physical_features, target
+
+        if not target.has("gt_proposal_validity"):
+            return proposals, physical_features, target
+
+        validity = target.gt_proposal_validity.tensor
+        if validity.numel() != len(proposals):
+            # Keep data unchanged if supervision length does not match proposal count.
+            return proposals, physical_features, target
+
+        # Identify positive proposals based on gt_proposal_validity
+        positive_mask = validity > 0.5
+        negative_mask = ~positive_mask
+
+        positive_indices = torch.where(positive_mask)[0]
+        negative_indices = torch.where(negative_mask)[0]
+
+        num_negatives = int(len(positive_indices)/self.positive_fraction)
+        
+        if len(negative_indices) > num_negatives:
+            negative_indices = negative_indices[torch.randperm(len(negative_indices))[:num_negatives]]
+
+        sampled_indices = torch.cat([positive_indices, negative_indices])
+        if sampled_indices.numel() == 0:
+            return proposals, physical_features, target
+        sampled_indices = sampled_indices[torch.randperm(sampled_indices.numel())]
+        
+        sampled_proposals = proposals[sampled_indices]
+        sampled_physical_features = Instances(proposals.image_size)
+        sampled_physical_features.component_mask = physical_features.component_mask[sampled_indices]
+        sampled_physical_features.component_features = physical_features.component_features[sampled_indices]
+        
+        sampled_target = Instances(proposals.image_size)
+        sampled_target.component_mask = target.component_mask[sampled_indices]
+        sampled_target.gt_component_membership = target.gt_component_membership[sampled_indices]
+        sampled_target.gt_proposal_validity = target.gt_proposal_validity[sampled_indices]
+
+        return sampled_proposals, sampled_physical_features, sampled_target
 
     def _build_membership_validity_target(self, image_size, masks: np.ndarray, annotations: Any) -> Instances:
         target = Instances(image_size)
