@@ -45,6 +45,13 @@ class AttentionFusionModule(nn.Module):
         # Project to physics embedding dim: (N, H*W, D)
         roi_spatial = self.roi_proj(roi_spatial)
 
+        # Add positional encoding ase we are using roi_spatial as keys/values in attention.
+        # This helps the model learn spatial patterns.
+        pos = self._build_2d_sincos_position_embedding(
+            h, w, feat_dim, device=roi_features.device
+        )
+        roi_spatial = roi_spatial + pos.unsqueeze(0)  # (N, H*W, D)
+
         # --- Cross-attention: component queries attend to spatial ROI keys ---
         # Q: (N, C_comp, D)  K=V: (N, H*W, D)
         query = physics_feats.reshape(expected_n, num_components, feat_dim)
@@ -64,6 +71,34 @@ class AttentionFusionModule(nn.Module):
         physics_attended_features = physics_fan_features["attention_features"]  # (B, P, C, D)
         membership_matrix = physics_fan_features["membership_matrix"]  # (B, P, C)
         return physics_attended_features, membership_matrix
+    
+    def _build_2d_sincos_position_embedding(self, h, w, dim, device):
+        """
+        Build 2D sinusoidal positional embeddings.
+
+        Returns: (H*W, dim)
+        """
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(h, device=device),
+            torch.arange(w, device=device),
+            indexing="ij"
+        )
+
+        grid = torch.stack((grid_x, grid_y), dim=-1).float()  # (H, W, 2)
+
+        dim_half = dim // 2
+        omega = torch.arange(dim_half, device=device) / dim_half
+        omega = 1.0 / (10000 ** omega)
+
+        out_x = grid[..., 0].reshape(-1, 1) * omega
+        out_y = grid[..., 1].reshape(-1, 1) * omega
+
+        pos_x = torch.cat([torch.sin(out_x), torch.cos(out_x)], dim=1)
+        pos_y = torch.cat([torch.sin(out_y), torch.cos(out_y)], dim=1)
+
+        pos = torch.cat([pos_x, pos_y], dim=1)
+
+        return pos[:, :dim]
 
 
 class ConcatenationFusionModule(nn.Module):
@@ -114,3 +149,4 @@ def build_fusion_module(cfg, roi_feature_dim, physics_fan_feature_dim):
         )
     else:
         raise ValueError(f"Unknown fusion module type: {cfg.MODEL.FUSION_MODULE.TYPE}. Supported types: 'AttentionFusionModule', 'Concatenation'")
+    

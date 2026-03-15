@@ -14,7 +14,6 @@ from detectron2.utils.logger import log_first_n
 from detectron2.modeling.backbone import Backbone, build_backbone
 from detectron2.modeling.postprocessing import detector_postprocess
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
-from detectron2.modeling.meta_arch.rcnn import GeneralizedRCNN
 
 from ..tail import build_physics_fan, build_fusion_module
 from ..roi_heads import build_roi_align, build_physics_heads
@@ -258,7 +257,7 @@ class TailedRCNN(nn.Module):
 
         if do_postprocess:
             assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
-            return TailedRCNN._postprocess(results, batched_inputs, images.image_sizes)
+            return TailedRCNN._postprocess(results, batched_inputs)
         return results
 
     def preprocess_image(self, batched_inputs: List[Dict[str, torch.Tensor]]):
@@ -275,17 +274,25 @@ class TailedRCNN(nn.Module):
         return images
 
     @staticmethod
-    def _postprocess(instances, batched_inputs: List[Dict[str, torch.Tensor]], image_sizes):
+    def _postprocess(instances, batched_inputs: List[Dict[str, torch.Tensor]]):
         """
         Rescale the output instances to the target size.
         """
-        # note: private function; subject to changes
         processed_results = []
-        for results_per_image, input_per_image, image_size in zip(
-            instances, batched_inputs, image_sizes
+        for r, input_per_image in zip(
+            instances, batched_inputs
         ):
-            height = input_per_image.get("height", image_size[0])
-            width = input_per_image.get("width", image_size[1])
-            r = detector_postprocess(results_per_image, height, width)
-            processed_results.append({"instances": r})
+            ress = {
+                "instances": r
+            }
+
+            # If annotations are included in the input, we also include the GT proposal validity
+            # and component membership in the output for evaluation purposes.
+            # This is not needed for inference, but can be useful for evaluating on a
+            # validation set where annotations are available.
+            # if 'annotations' in input_per_image:
+            #     ress["gt_proposal_validity"] = input_per_image.gt_proposal_validity
+            #     ress["gt_component_membership"] = input_per_image.gt_component_membership
+
+            processed_results.append(ress)
         return processed_results

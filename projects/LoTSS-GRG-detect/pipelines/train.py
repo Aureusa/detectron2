@@ -34,6 +34,7 @@ from engine.b2s_trainer import B2STrainer
 
 from modeling.meta_arch import TailedRCNN
 
+
 logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")
 
 

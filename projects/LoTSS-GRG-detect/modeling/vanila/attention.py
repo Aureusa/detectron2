@@ -4,6 +4,57 @@ from torch import nn
 from .mlp import MLP
 
 
+class ComponentAttention(nn.Module):
+    """
+    Self-attention over the component axis for tensors shaped (N, C, D).
+
+    Architecture (pre-norm):
+        LayerNorm
+        MultiheadAttention (batch_first=True)
+        + residual
+        LayerNorm
+        (no inner FFN — pair with ResidualMLPBlock if needed)
+    """
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.norm = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim,
+            num_heads,
+            batch_first=True,
+            dropout=dropout,
+        )
+        self.out_drop = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: (N, C, D)
+            key_padding_mask: (N, C) bool — True means *ignore* that component.
+        Returns:
+            (N, C, D)
+        """
+        if x.dim() != 3:
+            raise ValueError(f"ComponentAttention expects (N, C, D), got {tuple(x.shape)}")
+
+        if key_padding_mask is not None:
+            # Guard: avoid all-masked rows (produces NaN in softmax)
+            all_masked = key_padding_mask.all(dim=1)
+            if all_masked.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_masked, 0] = False
+
+        residual = x
+        x = self.norm(x)
+        x, _ = self.attn(x, x, x, key_padding_mask=key_padding_mask)
+        x = self.out_drop(x)
+        return x + residual
+
+
 class MHAttention(nn.Module):
     """Multi-Head Attention module for enhancing features with attention mechanisms."""
     def __init__(self, embed_dim, num_heads, dropout=0.0):

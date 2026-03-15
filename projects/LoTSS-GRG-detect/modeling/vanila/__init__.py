@@ -1,2 +1,2 @@
-from .mlp import MLP
-from .attention import MHAttention
+from .mlp import MLP, ResidualMLPBlock
+from .attention import MHAttention, ComponentAttention
