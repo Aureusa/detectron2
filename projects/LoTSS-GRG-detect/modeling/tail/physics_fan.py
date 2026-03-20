@@ -18,7 +18,7 @@ from detectron2.modeling.roi_heads import build_roi_heads
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
 from detectron2.modeling.meta_arch.rcnn import GeneralizedRCNN
 
-from ..vanila import MHAttention, MLP
+from ..vanila import TransformerBlock, MLP
 
 
 class PhysicsFAN(nn.Module):
@@ -39,7 +39,7 @@ class PhysicsFAN(nn.Module):
         self.embedding_dim = embedding_dim
 
         self.embedding_mlp = MLP(input_dim=num_physics_features, hidden_dim=embedding_dim, output_dim=embedding_dim, dropout=embedding_dropout)
-        self.attention = MHAttention(embed_dim=embedding_dim, num_heads=num_attention_heads, dropout=attention_dropout)
+        self.transformer_block = TransformerBlock(embed_dim=embedding_dim, num_heads=num_attention_heads, dropout=attention_dropout)
 
     @classmethod
     def from_config(cls, cfg):
@@ -72,7 +72,7 @@ class PhysicsFAN(nn.Module):
         unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
         embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
 
-        attended_features, attn_scores = self.attention(
+        attended_features, attn_scores = self.transformer_block(
             embedded_features,
             embedded_features,
             embedded_features,

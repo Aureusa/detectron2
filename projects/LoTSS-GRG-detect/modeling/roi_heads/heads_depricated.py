@@ -54,16 +54,14 @@ class ProposalValidityHead(nn.Module):
     Input:  (N, input_dim)  — membership-weighted component context
     Output: (N,)            — proposal validity logits
     """
-    def __init__(self, input_dim: int, hidden_dim: int = 256, dropout: float = 0.0, two_classes: bool = False):
+    def __init__(self, input_dim: int, hidden_dim: int = 256, dropout: float = 0.0):
         super().__init__()
         self.proj = nn.Linear(input_dim, hidden_dim)
         self.blocks = nn.Sequential(
             ResidualMLPBlock(hidden_dim, dropout=dropout),
             ResidualMLPBlock(hidden_dim, dropout=dropout),
         )
-        # If two_classes is True, output 3 logits for multi-class classification (MCS/SCS/invalid)
-        # instead of binary classification (valid/invalid)
-        self.out = nn.Linear(hidden_dim, 1 if not two_classes else 3)
+        self.out = nn.Linear(hidden_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (N, input_dim) -> logits: (N,)
@@ -73,7 +71,7 @@ class ProposalValidityHead(nn.Module):
             )
         x = self.proj(x)    # (N, H)
         x = self.blocks(x)  # (N, H)
-        return self.out(x).squeeze(-1)  # (N,) or (N, 3) if two_classes
+        return self.out(x).squeeze(-1)  # (N,)
 
 
 class PhysicsAwareHeads(nn.Module):
@@ -112,7 +110,6 @@ class PhysicsAwareHeads(nn.Module):
         membership_loss_weight: float = 1.0,
         proposal_loss_weight: float = 1.0,
         decouple_validity_projection: bool = True,
-        two_classes: bool = False,
     ):
         super().__init__()
         self.membership_loss_weight = membership_loss_weight
@@ -138,10 +135,7 @@ class PhysicsAwareHeads(nn.Module):
             input_dim=(hidden_dim * 3 + 1),
             hidden_dim=proposal_head_hidden_dim,
             dropout=dropout,
-            two_classes=two_classes,
         )
-
-        self.two_classes = two_classes
 
     def _normalize_input(self, fused_features: torch.Tensor) -> torch.Tensor:
         if isinstance(fused_features, tuple):
@@ -185,17 +179,10 @@ class PhysicsAwareHeads(nn.Module):
         if not supervision[0].has("gt_component_membership"):
             return {}
 
-        # Prevent a single unstable batch from poisoning BCE inputs.
-        membership_logits = torch.nan_to_num(membership_logits, nan=0.0, posinf=30.0, neginf=-30.0)
-        proposal_validity_logits = torch.nan_to_num(
-            proposal_validity_logits, nan=0.0, posinf=30.0, neginf=-30.0
-        )
-
         gt_membership = torch.cat(
             [self._to_tensor(inst.gt_component_membership, membership_logits.device) for inst in supervision],
             dim=0,
         ).float()
-        gt_membership = torch.nan_to_num(gt_membership, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
         if supervision[0].has("gt_proposal_validity"):
             gt_validity = torch.cat(
@@ -204,77 +191,6 @@ class PhysicsAwareHeads(nn.Module):
             ).float()
         else:
             gt_validity = torch.ones_like(proposal_validity_logits)
-        gt_validity = torch.nan_to_num(gt_validity, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-
-        if self.two_classes:
-            # If using multi-class membership (MCS/SCS/invalid) use CrossEntropyLoss
-            # which expects class indices rather than one-hot vectors.
-            member_loss, proposal_loss = self._cross_entropy_with_logits(
-                membership_logits=membership_logits,
-                gt_membership=gt_membership,
-                proposal_validity_logits=proposal_validity_logits,
-                gt_validity=gt_validity,
-                component_mask=component_mask,
-            )
-        else:
-            # Else use binary classification for membership (member vs non-member) with BCEWithLogitsLoss.
-            member_loss, proposal_loss = self._binary_cross_entropy_with_logits(
-                membership_logits=membership_logits,
-                gt_membership=gt_membership,
-                proposal_validity_logits=proposal_validity_logits,
-                gt_validity=gt_validity,
-                component_mask=component_mask,
-            )
-
-        return {
-            "loss_membership": member_loss * self.membership_loss_weight,
-            "loss_proposal_validity": proposal_loss * self.proposal_loss_weight,
-        }
-    
-    def _cross_entropy_with_logits(
-        self,
-        membership_logits: torch.Tensor,
-        gt_membership: torch.Tensor,
-        proposal_validity_logits: torch.Tensor,
-        gt_validity: torch.Tensor,
-        component_mask: torch.Tensor
-    ) -> torch.Tensor:
-        # For multi-class membership (MCS/SCS/invalid), use CrossEntropyLoss which expects class indices.
-        # gt_membership is expected to be (N, C) with values in {0, 1} where 0=invalid, 1=member.
-        # We treat this as binary classification for each component.
-        member_loss = F.binary_cross_entropy_with_logits(
-            membership_logits,
-            gt_membership,
-            reduction="none",
-        )
-        member_loss = (member_loss * component_mask.float()).sum() / component_mask.float().sum().clamp_min(1.0)
-
-        # For proposal validity we have a vector (N,3) of logits for the 3 classes first is SCS, second is MCS, third is invalid.
-        # We convert gt_validity to class indices where 0=SCS, 1=MCS, 2=invalid.
-        # In the gt_validity tensor, we have a vector of (N,) where 1=SCS, 2=MCS, 0=invalid.
-        # We need to convert this to class indices for CrossEntropyLoss.
-        gt_validity_indices = gt_validity.long()  # (N,) with values in {0, 1, 2}
-        proposal_loss = F.cross_entropy(
-            proposal_validity_logits,
-            gt_validity_indices,
-            # reduction="none"
-        )
-
-        return member_loss, proposal_loss
-    
-    def _binary_cross_entropy_with_logits(
-            self,
-            membership_logits: torch.Tensor,
-            gt_membership: torch.Tensor,
-            proposal_validity_logits: torch.Tensor,
-            gt_validity: torch.Tensor,
-            component_mask: torch.Tensor
-        ) -> torch.Tensor:
-        # For membership validity, use pos_weight to handle class imbalance
-        # (many more invalid members than valid ones).
-        # pos_count = (gt_membership == 1).float().sum()
-        # neg_count = (gt_membership == 0).float().sum()
-        # pos_weight = (neg_count / pos_count.clamp_min(1.0)).clamp(max=20.0)
 
         member_loss = F.binary_cross_entropy_with_logits(
             membership_logits,
@@ -285,15 +201,18 @@ class PhysicsAwareHeads(nn.Module):
 
         # For proposal validity, use pos_weight to handle class imbalance
         # (many more invalid proposals than valid ones).
-        # pos_count = (gt_validity == 1).float().sum()
-        # neg_count = (gt_validity == 0).float().sum()
-        # pos_weight = (neg_count / pos_count.clamp_min(1.0)).clamp(max=20.0)
+        # pos_weight = (gt_validity == 0).float().sum() / (gt_validity == 1).float().sum().clamp_min(1.0)
 
         proposal_loss = F.binary_cross_entropy_with_logits(
             proposal_validity_logits,
             gt_validity,
+            # pos_weight=pos_weight,
         )
-        return member_loss, proposal_loss
+
+        return {
+            "loss_membership": member_loss * self.membership_loss_weight,
+            "loss_proposal_validity": proposal_loss * self.proposal_loss_weight,
+        }
 
     @staticmethod
     def _to_tensor(value, device: torch.device) -> torch.Tensor:
@@ -310,13 +229,7 @@ class PhysicsAwareHeads(nn.Module):
         proposal_validity_logits: torch.Tensor,
     ) -> List[Instances]:
         membership_probs = torch.sigmoid(membership_logits)
-        # two_classes=True: logits are (N, 3) → softmax so class probs sum to 1.
-        # Stored as (N, 3); downstream use .argmax(dim=-1) for predicted class,
-        # or inspect per-class probs directly for confusion/calibration analysis.
-        if self.two_classes:
-            validity_probs = torch.softmax(proposal_validity_logits, dim=-1)
-        else:
-            validity_probs = torch.sigmoid(proposal_validity_logits)
+        validity_probs = torch.sigmoid(proposal_validity_logits)
 
         start = 0
         for inst in proposals:
@@ -325,7 +238,6 @@ class PhysicsAwareHeads(nn.Module):
                 continue
             inst.pred_component_membership = membership_probs[start : start + n]
             inst.pred_proposal_validity = validity_probs[start : start + n]
-            inst.pred_proposal_validity_logits = proposal_validity_logits[start : start + n]
             start += n
         return proposals
 
@@ -343,7 +255,6 @@ class PhysicsAwareHeads(nn.Module):
             shape=x_input.shape[:2],
             device=x_input.device,
         )  # (N, C) bool — True = valid component
-        valid_mask = component_mask.float()
 
         # Shared projection: (N, C, K) -> (N, C, H)
         x_membership = self.shared_drop(self.shared_proj(x_input))
@@ -358,14 +269,11 @@ class PhysicsAwareHeads(nn.Module):
         membership_logits = self.membership_head(
             x_membership, key_padding_mask=~component_mask
         )  # (N, C)
-        membership_logits = membership_logits.clamp(-30, 30) # Clamp logits before sigmoid to prevent NaNs in extreme cases.
 
         # Apply sigmoid to get membership probabilities, then mask out invalid components.
         # Also detach to prevent gradients from flowing into the membership
         # head when computing proposal losses.
-        # TODO: consider not detaching if as right now the network does not use 
-        # validity gradients to update the membership head, but this in theory is what we want.
-        membership_prob = torch.sigmoid(membership_logits).detach() * valid_mask  # (N, C)
+        membership_prob = torch.sigmoid(membership_logits).detach() * component_mask.float()
 
         # Build a richer proposal context for validity classification:
         # [membership-weighted mean, unweighted valid-component mean,
@@ -373,35 +281,17 @@ class PhysicsAwareHeads(nn.Module):
         weighted_denom = membership_prob.sum(dim=1, keepdim=True).clamp_min(1e-6)
         weighted_mean = (x_validity * membership_prob.unsqueeze(-1)).sum(dim=1) / weighted_denom
 
+        valid_mask = component_mask.float()
         raw_valid_count = valid_mask.sum(dim=1, keepdim=True)
         valid_count = raw_valid_count.clamp_min(1.0)
         unweighted_mean = (x_validity * valid_mask.unsqueeze(-1)).sum(dim=1) / valid_count
 
-        # Alternative weighted max. This substitutes unweighted mean since this gives the proposal
-        # head a membership-free shortcut, which makes component-level supervision less effective.
-
-        # Keep max pooling numerically stable by using finite fill values.
+        # Avoid -inf entering the classifier: handle all-masked rows explicitly.
         x_valid_masked = x_validity.masked_fill(~component_mask.unsqueeze(-1), -1e9)
         max_pool = x_valid_masked.max(dim=1).values
         max_pool = torch.where(raw_valid_count > 0, max_pool, torch.zeros_like(max_pool))
-        
-        # Alternative weighted max. This substitutes unweighted mean since this gives the proposal
-        # head a membership-free shortcut, which makes component-level supervision less effective.
-        # Multiply the component features by the membership probabilities to get a weighted max
-        # then mask out invalid components with a large negative value to prevent them from dominating the max.
-        x_weighted = x_validity * membership_prob.unsqueeze(-1)
-        x_weighted_masked = x_weighted.masked_fill(~component_mask.unsqueeze(-1), -1e9)
-        weighted_max_pool = x_weighted_masked.max(dim=1).values
-        weighted_max_pool = torch.where(raw_valid_count > 0, weighted_max_pool, torch.zeros_like(weighted_max_pool))
 
-        proposal_context = torch.cat(
-            [
-                weighted_mean,
-                unweighted_mean, # Alternative: weighted_mean, TODO: try in the future if membership improvement is stale
-                max_pool,
-                valid_count
-            ], dim=1)
-        proposal_context = torch.nan_to_num(proposal_context, nan=0.0, posinf=1e4, neginf=-1e4)
+        proposal_context = torch.cat([weighted_mean, unweighted_mean, max_pool, valid_count], dim=1)
 
         proposal_validity_logits = self.proposal_validity_head(proposal_context)  # (N,)
 
@@ -432,7 +322,6 @@ def build_physics_heads(cfg, input_dim) -> PhysicsAwareHeads:
     num_heads = cfg.MODEL.MEMBERSHIP_HEAD.NUM_HEADS
     dropout = cfg.MODEL.MEMBERSHIP_HEAD.DROPOUT
     decouple_validity_projection = cfg.MODEL.VALIDITY_HEAD.DECOUPLE_PROJECTION
-    two_classes = cfg.MODEL.VALIDITY_HEAD.TWO_CLASSES # Whether to treat membership as binary (member vs non-member) or multi-class (MCS/SCS/invalid)
     return PhysicsAwareHeads(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
@@ -443,5 +332,4 @@ def build_physics_heads(cfg, input_dim) -> PhysicsAwareHeads:
         membership_loss_weight=membership_loss_weight,
         proposal_loss_weight=proposal_loss_weight,
         decouple_validity_projection=decouple_validity_projection,
-        two_classes=two_classes,
     )

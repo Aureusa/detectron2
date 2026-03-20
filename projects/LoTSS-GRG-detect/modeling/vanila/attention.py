@@ -55,7 +55,7 @@ class ComponentAttention(nn.Module):
         return x + residual
 
 
-class MHAttention(nn.Module):
+class TransformerBlock(nn.Module):
     """Multi-Head Attention module for enhancing features with attention mechanisms."""
     def __init__(self, embed_dim, num_heads, dropout=0.0):
         super().__init__()

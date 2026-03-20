@@ -123,7 +123,17 @@ class Visualizer:
     # TODO implement a fast, rasterized version using OpenCV
 
     def __init__(
-        self, img_rgb, metadata=None, threshold=0.5, scale=1.0, font_size_scale=1.0
+        self,
+        img_rgb,
+        metadata=None,
+        validity_threshold=0.5,
+        membership_threshold=0.1,
+        scale=1.0,
+        font_size_scale=1.0,
+        classes = {
+            "SCS": 1, # Single Component Segment
+            "MCS": 2, # Multi Component Segment
+        },
     ):
         """
         Args:
@@ -140,9 +150,12 @@ class Visualizer:
         if metadata is None:
             metadata = MetadataCatalog.get("__nonexist__")
         self.metadata = metadata
-        self.threshold = threshold
+        self.validity_threshold = validity_threshold
+        self.membership_threshold = membership_threshold
         self.output = VisImage(self.img, scale=scale)
         self.cpu_device = torch.device("cpu")
+
+        self.classes = classes
 
         # too small texts are useless, therefore clamp to 5
         self._default_font_size = (
@@ -171,12 +184,16 @@ class Visualizer:
         """
         prediction = predictions.to(self.cpu_device)
 
-        pred_proposal_validity = self._to_numpy(prediction.pred_proposal_validity)  # (N,)
+        pred_proposal_validity = self._to_numpy(prediction.pred_proposal_validity)  # (N,) or (N, CLS) if multi-class
         pred_component_membership = self._to_numpy(prediction.pred_component_membership) # (N, C)
 
+        if len(pred_proposal_validity.shape) == 2 and pred_proposal_validity.shape[1] > 1:
+            # multi-class case: take the max class score as the proposal validity score
+            pred_proposal_validity = np.argmax(pred_proposal_validity, axis=1) # (N,)
+
         # Set all predictions above the threshold to 1, and the rest to 0.
-        pred_proposal_validity = (pred_proposal_validity > self.threshold).astype(np.int32) # (N,)
-        pred_component_membership = (pred_component_membership > self.threshold).astype(np.int32) # (N, C)
+        pred_proposal_validity = (pred_proposal_validity > self.validity_threshold).astype(np.int32) # (N,)
+        pred_component_membership = (pred_component_membership > self.membership_threshold).astype(np.int32) # (N, C)
 
         proposals_path = self._get_proposal_filepath(dic['file_name'])
 
@@ -229,7 +246,7 @@ class Visualizer:
             proposal_boxes = np.load(proposals_path)['boxes']
             valid_proposal_boxes = []
             for proposal_box, proposal_valid in zip(proposal_boxes, gt_proposal_validity):
-                if proposal_valid:
+                if proposal_valid > self.validity_threshold:
                     valid_proposal_boxes.append(proposal_box)
             valid_proposal_boxes = np.array(valid_proposal_boxes)
 
@@ -608,20 +625,28 @@ class Visualizer:
         boxes_match_validity = len(proposal_boxes) == len(proposal_validity)
 
         for i, prop_val in enumerate(proposal_validity):
-            if prop_val == 1:
-                if boxes_match_validity:
-                    if i >= len(proposal_boxes):
-                        continue
-                    box = proposal_boxes[i]
-                else:
-                    if valid_box_idx >= len(proposal_boxes):
-                        continue
-                    box = proposal_boxes[valid_box_idx]
-                    valid_box_idx += 1
+            if prop_val == 0: # 0 is always the invalid value
+                continue
+            if boxes_match_validity:
+                if i >= len(proposal_boxes):
+                    continue
+                box = proposal_boxes[i]
+            else:
+                if valid_box_idx >= len(proposal_boxes):
+                    continue
+                box = proposal_boxes[valid_box_idx]
+                valid_box_idx += 1
 
-                x_min, y_min, x_max, y_max = box
-                plotting_info["boxes"].append([x_min, y_min, x_max, y_max])
+            x_min, y_min, x_max, y_max = box
+            plotting_info["boxes"].append([x_min, y_min, x_max, y_max])
 
+            if self.classes is not None:
+                # Get the class id for the proposal box
+                for class_name, class_id in self.classes.items():
+                    if class_id == prop_val:
+                        label = f"{class_name}"
+                        break
+            else:
                 comp_in_prop = np.where(component_membership[i])[0]
                 comps_xy = []
                 # Always keep one label per box to satisfy overlay_instances.
@@ -632,8 +657,8 @@ class Visualizer:
                         if gt and label == "GT":
                             label = c.get('source_name', "GT")
 
-                plotting_info["labels"].append(label)
-                plotting_info["components_xy"].append(comps_xy)
+            plotting_info["labels"].append(label)
+            plotting_info["components_xy"].append(comps_xy)
         return plotting_info
 
     def _create_grayscale_image(self, mask=None):

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from ..vanila import MHAttention
+from ..vanila import TransformerBlock, ROIEncoder
 
 
 class AttentionFusionModule(nn.Module):
@@ -22,8 +22,13 @@ class AttentionFusionModule(nn.Module):
     def __init__(self, roi_feature_dim, physics_fan_feature_dim, dropout=0.0, num_heads=8):
         super().__init__()
         # Project ROI channels to physics embedding dim so Q and K share the same space.
-        self.roi_proj = nn.Linear(roi_feature_dim, physics_fan_feature_dim)
-        self.attention = MHAttention(physics_fan_feature_dim, num_heads, dropout)
+        self.roi_encoder = ROIEncoder(roi_feature_dim, roi_feature_dim, dropout=dropout)
+        # self.roi_projector = nn.Sequential(
+        #     nn.LayerNorm(roi_feature_dim),
+        #     nn.Linear(roi_feature_dim, physics_fan_feature_dim)
+        # )
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, physics_fan_feature_dim))  # Learnable CLS token
+        self.transformer_block = TransformerBlock(embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout)
 
     def forward(self, roi_features, physics_fan_features):
         physics_feats, membership = self._unpack_physics_fan_features(
@@ -40,16 +45,27 @@ class AttentionFusionModule(nn.Module):
                 f"got {tuple(roi_features.shape)}."
             )
         n, c, h, w = roi_features.shape
+        roi_features = self.roi_encoder(roi_features) # (N, roi_dim, H, W)
+        # roi_features = self.roi_projector(roi_features.permute(0, 2, 3, 1))  # (N, H, W, D)
+
         # (N, C, H, W) -> (N, H*W, C)
         roi_spatial = roi_features.permute(0, 2, 3, 1).reshape(n, h * w, c)
-        # Project to physics embedding dim: (N, H*W, D)
-        roi_spatial = self.roi_proj(roi_spatial)
+
+        # --- ADD CLS TOKEN ---
+        cls_token = roi_spatial.mean(dim=1, keepdim=True)  # (N, 1, C)
+        # cls_token = self.cls_token.expand(n, -1, -1)  # (N, 1, C)
+        roi_spatial = torch.cat([cls_token, roi_spatial], dim=1)  # (N, 1 + H*W, C)
 
         # Add positional encoding ase we are using roi_spatial as keys/values in attention.
         # This helps the model learn spatial patterns.
         pos = self._build_2d_sincos_position_embedding(
             h, w, feat_dim, device=roi_features.device
         )
+
+        # IMPORTANT: expand pos to match CLS
+        cls_pos = torch.zeros(1, feat_dim, device=roi_features.device)  # (1, C)
+        pos = torch.cat([cls_pos, pos], dim=0)  # (1 + H*W, C)
+
         roi_spatial = roi_spatial + pos.unsqueeze(0)  # (N, H*W, D)
 
         # --- Cross-attention: component queries attend to spatial ROI keys ---
@@ -57,7 +73,7 @@ class AttentionFusionModule(nn.Module):
         query = physics_feats.reshape(expected_n, num_components, feat_dim)
         key = roi_spatial  # (N, H*W, D)
 
-        attn_output, attn_scores = self.attention(
+        attn_output, attn_scores = self.transformer_block(
             query, key, key
             # No key_padding_mask needed: all spatial positions are valid.
         )  # (N, C_comp, D)
