@@ -19,16 +19,34 @@ class AttentionFusionModule(nn.Module):
     the per-component membership/validity heads.
     """
 
-    def __init__(self, roi_feature_dim, physics_fan_feature_dim, dropout=0.0, num_heads=8):
+    def __init__(self, roi_feature_dim, physics_fan_feature_dim, dropout=0.0, num_heads=8, bidirectional=False):
         super().__init__()
+        # --- ROI spatial tokens ---
         # Project ROI channels to physics embedding dim so Q and K share the same space.
         self.roi_encoder = ROIEncoder(roi_feature_dim, roi_feature_dim, dropout=dropout)
-        # self.roi_projector = nn.Sequential(
-        #     nn.LayerNorm(roi_feature_dim),
-        #     nn.Linear(roi_feature_dim, physics_fan_feature_dim)
-        # )
-        # self.cls_token = nn.Parameter(torch.zeros(1, 1, physics_fan_feature_dim))  # Learnable CLS token
-        self.transformer_block = TransformerBlock(embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout)
+        self.roi_projector = nn.Sequential(
+            nn.LayerNorm(roi_feature_dim),
+            nn.Linear(roi_feature_dim, physics_fan_feature_dim)
+        )
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, physics_fan_feature_dim))  # Learnable CLS token
+
+        # --- Cross-attention blocks ---
+        self.transformer_block = TransformerBlock(
+            embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout
+        )
+        if bidirectional:
+            self.transformer_block_roi = TransformerBlock(
+                embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout
+            )
+
+            # --- Fusion ---
+            self.fusion_gate = nn.Sequential(
+                nn.Linear(physics_fan_feature_dim * 2, physics_fan_feature_dim),
+                nn.Sigmoid(),
+            )
+            self.fusion_context_proj = nn.Linear(physics_fan_feature_dim, physics_fan_feature_dim)
+
+        self.bidirectional = bidirectional
 
     def forward(self, roi_features, physics_fan_features):
         physics_feats, membership = self._unpack_physics_fan_features(
@@ -46,14 +64,13 @@ class AttentionFusionModule(nn.Module):
             )
         n, c, h, w = roi_features.shape
         roi_features = self.roi_encoder(roi_features) # (N, roi_dim, H, W)
-        # roi_features = self.roi_projector(roi_features.permute(0, 2, 3, 1))  # (N, H, W, D)
+        roi_features = self.roi_projector(roi_features.permute(0, 2, 3, 1))  # (N, H, W, D)
 
-        # (N, C, H, W) -> (N, H*W, C)
-        roi_spatial = roi_features.permute(0, 2, 3, 1).reshape(n, h * w, c)
+        # (N, H, W, D) -> (N, H*W, D)
+        roi_spatial = roi_features.reshape(n, h * w, feat_dim)
 
         # --- ADD CLS TOKEN ---
-        cls_token = roi_spatial.mean(dim=1, keepdim=True)  # (N, 1, C)
-        # cls_token = self.cls_token.expand(n, -1, -1)  # (N, 1, C)
+        cls_token = self.cls_token.expand(n, -1, -1)  # (N, 1, C)
         roi_spatial = torch.cat([cls_token, roi_spatial], dim=1)  # (N, 1 + H*W, C)
 
         # Add positional encoding ase we are using roi_spatial as keys/values in attention.
@@ -66,22 +83,107 @@ class AttentionFusionModule(nn.Module):
         cls_pos = torch.zeros(1, feat_dim, device=roi_features.device)  # (1, C)
         pos = torch.cat([cls_pos, pos], dim=0)  # (1 + H*W, C)
 
-        roi_spatial = roi_spatial + pos.unsqueeze(0)  # (N, H*W, D)
+        roi_spatial = roi_spatial + pos.unsqueeze(0)  # (N, 1 + H*W, D)
+        if self.bidirectional:
+            return self._bidirectional_fusion(
+                physics_feats,
+                roi_spatial,
+                membership,
+                expected_n,
+                num_components,
+                feat_dim,
+                bsz,
+                proposals_per_image,
+            )
+        else:
+            return self._unidirectional_fusion(
+                physics_feats,
+                roi_spatial,
+                membership,
+                expected_n,
+                num_components,
+                feat_dim,
+                bsz,
+                proposals_per_image,
+            )
 
+    def _unidirectional_fusion(self, physics_feats, roi_spatial, membership, expected_n, num_components, feat_dim, bsz, proposals_per_image):
         # --- Cross-attention: component queries attend to spatial ROI keys ---
-        # Q: (N, C_comp, D)  K=V: (N, H*W, D)
+        # Q: (N, C_comp, D)  K=V: (N, 1 + H*W, D)
         query = physics_feats.reshape(expected_n, num_components, feat_dim)
-        key = roi_spatial  # (N, H*W, D)
+        key = roi_spatial  # (N, 1 + H*W, D)
 
-        attn_output, attn_scores = self.transformer_block(
+        physics_attends_to_roi, _ = self.transformer_block(
             query, key, key
             # No key_padding_mask needed: all spatial positions are valid.
         )  # (N, C_comp, D)
 
-        # Add spatial context back to component features (residual), re-apply membership mask.
-        fused = physics_feats + attn_output.reshape(bsz, proposals_per_image, num_components, feat_dim)
-        fused = fused * membership.unsqueeze(-1).float()
-        return fused, attn_scores
+        fused = physics_attends_to_roi.reshape(bsz, proposals_per_image, num_components, feat_dim) # (B, P, C_comp, D)
+        fused = fused * membership.unsqueeze(-1).float()  # Mask out components not in the proposal
+        return fused, {
+            "physics_to_roi": physics_attends_to_roi,
+        }
+    
+    def _bidirectional_fusion(
+            self,
+            physics_feats,
+            roi_spatial,
+            membership,
+            expected_n,
+            num_components,
+            feat_dim,
+            bsz,
+            proposals_per_image
+        ):
+        # --- Cross-attention: component queries attend to spatial ROI keys ---
+        # Q: (N, C_comp, D)  K=V: (N, 1 + H*W, D)
+        query = physics_feats.reshape(expected_n, num_components, feat_dim)
+        key = roi_spatial  # (N, 1 + H*W, D)
+
+        physics_attends_to_roi, _ = self.transformer_block(
+            query, key, key
+            # No key_padding_mask needed: all spatial positions are valid.
+        )  # (N, C_comp, D)
+
+        # --- Cross-attention: ROI queries attend to component keys ---
+        # Q: (N, 1 + H*W, D)  K=V: (N, C_comp, D)
+        query = roi_spatial  # (N, 1 + H*W, D)
+        key = physics_feats.reshape(expected_n, num_components, feat_dim)
+
+        roi_attends_to_physics, _ = self.transformer_block_roi(
+            query, key, key,
+            # We need mask as some proposals have fewer components, so some rows in physics_feats are padding.
+            key_padding_mask=~membership.reshape(expected_n, num_components).bool()  # (N, C_comp)
+        )   # (N, 1 + H*W, D)
+
+        # --- Broadcasting ---
+        # Reshape back to (B, P, C_comp, D)
+        physics_attends_to_roi = physics_attends_to_roi.reshape(
+            bsz, proposals_per_image, num_components, feat_dim
+        )   # (B, P, C_comp, D)
+
+        # Also reshape roi_attends_to_physics to (B, P, 1 + H*W, D)
+        roi_attends_to_physics = roi_attends_to_physics.reshape(
+            bsz, proposals_per_image, -1, feat_dim
+        )   # (B, P, 1 + H*W, D)
+
+        # --- Fusion ---
+        # Use CLS token as proposal-level ROI context, then gate it into component space.
+        roi_context = roi_attends_to_physics[:, :, 0, :]  # (B, P, D)
+        roi_context = roi_context.unsqueeze(2).expand(-1, -1, num_components, -1)  # (B, P, C_comp, D)
+
+        gate_input = torch.cat([physics_attends_to_roi, roi_context], dim=-1)  # (B, P, C_comp, 2D)
+        gate = self.fusion_gate(gate_input)  # (B, P, C_comp, D)
+        delta = self.fusion_context_proj(roi_context)  # (B, P, C_comp, D)
+
+        fused = self.fusion_norm(physics_attends_to_roi + gate * delta + physics_feats)
+        fused = fused * membership.unsqueeze(-1).float()  # Mask out components not in the proposal
+
+        return fused, {
+            "physics_to_roi": physics_attends_to_roi,
+            "roi_to_physics": roi_attends_to_physics,
+            "gate": gate,
+        }
 
     def _unpack_physics_fan_features(self, physics_fan_features):
         physics_attended_features = physics_fan_features["attention_features"]  # (B, P, C, D)
@@ -157,6 +259,7 @@ def build_fusion_module(cfg, roi_feature_dim, physics_fan_feature_dim):
             physics_fan_feature_dim=physics_fan_feature_dim,
             dropout=cfg.MODEL.FUSION_MODULE.DROPOUT,
             num_heads=cfg.MODEL.FUSION_MODULE.NUM_HEADS,
+            bidirectional=cfg.MODEL.FUSION_MODULE.BIDIRECTIONAL
         )
     elif cfg.MODEL.FUSION_MODULE.TYPE == "Concatenation":
         return ConcatenationFusionModule(

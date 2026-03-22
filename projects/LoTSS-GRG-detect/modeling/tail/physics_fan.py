@@ -41,6 +41,8 @@ class PhysicsFAN(nn.Module):
         self.embedding_mlp = MLP(input_dim=num_physics_features, hidden_dim=embedding_dim, output_dim=embedding_dim, dropout=embedding_dropout)
         self.transformer_block = TransformerBlock(embed_dim=embedding_dim, num_heads=num_attention_heads, dropout=attention_dropout)
 
+        # self.component_embedding = nn.Embedding(num_components, embedding_dim)  # Learnable embeddings for each component type
+
     @classmethod
     def from_config(cls, cfg):
         return {
@@ -66,9 +68,16 @@ class PhysicsFAN(nn.Module):
         # Binary membership matrix: (B, P, C), 1 if component is in proposal, 0 otherwise
         membership_matrix = self._binary_membership_matrix(features)  # (B, P, C)
 
-        features = self._preprocess_features(features)  # Pre-process the input features
+        features = self._preprocess_features(features)  # Pre-process the input features (B, P, C, num_physics_features)
+
+        # Add component id embeddings to the features to provide explicit component type information to the model.
+        # _, _, C, _ = features.shape
+        # component_ids = torch.arange(C, device=features.device)  # (C,)
+        # component_embeds = self.component_embedding(component_ids)  # (C, embedding_dim)
+        # component_embeds = component_embeds.unsqueeze(0).unsqueeze(0)  # (1, 1, C, embedding_dim) -> broadcast to (B, P, C, embedding_dim)
 
         embedded_features = self.embedding_mlp(features)  # (B, P, C, embedding_dim) - Batch size, P proposals, C components, embedding_dim features
+        # embedded_features += component_embeds  # Add component type embeddings
         unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
         embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
 

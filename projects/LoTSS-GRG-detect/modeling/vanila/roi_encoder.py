@@ -7,9 +7,12 @@ class ROIEncoder(nn.Module):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(input_dim, output_dim, 3, padding=1),
+            nn.BatchNorm2d(output_dim),
             nn.Dropout(dropout),
             nn.ReLU(),
+
             nn.Conv2d(output_dim, output_dim, 3, padding=1),
+            nn.BatchNorm2d(output_dim),
             nn.Dropout(dropout),
             nn.ReLU(),
         )

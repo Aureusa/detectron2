@@ -68,6 +68,10 @@ class TailedRCNN(nn.Module):
         self.roi_align = roi_align
         self.heads = heads
 
+        # Freeze ResNet
+        # for param in self.backbone.parameters():
+        #     param.requires_grad = False
+
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)

@@ -170,6 +170,67 @@ class PhysicsAwareHeads(nn.Module):
             return torch.cat([inst.component_mask.to(device) for inst in proposals], dim=0).bool()
         return torch.ones(shape, dtype=torch.bool, device=device)
 
+    def _membership_loss(
+            self,
+            membership_logits: torch.Tensor,
+            component_mask: torch.Tensor,
+            supervision: List[Instances]
+        ) -> torch.Tensor:
+        # Prevent a single unstable batch from poisoning BCE inputs.
+        membership_logits = torch.nan_to_num(membership_logits, nan=0.0, posinf=30.0, neginf=-30.0)
+
+        # Get the ground truth membership labels
+        gt_membership = torch.cat(
+            [self._to_tensor(inst.gt_component_membership, membership_logits.device) for inst in supervision],
+            dim=0,
+        ).float()
+        gt_membership = torch.nan_to_num(gt_membership, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+
+        # Compute binary cross-entropy loss for membership classification, masking out invalid components.
+        member_loss = F.binary_cross_entropy_with_logits(
+            membership_logits,
+            gt_membership,
+            reduction="none",
+        )
+        member_loss = (member_loss * component_mask.float()).sum() / component_mask.float().sum().clamp_min(1.0)
+        return member_loss
+    
+    def _validity_loss(
+            self,
+            proposal_validity_logits: torch.Tensor,
+            supervision: List[Instances]
+        ) -> torch.Tensor:
+        # Prevent a single unstable batch from poisoning Binary/Cross-Entropy inputs.
+        proposal_validity_logits = torch.nan_to_num(
+            proposal_validity_logits, nan=0.0, posinf=30.0, neginf=-30.0
+        )
+
+        gt_validity = torch.cat(
+            [self._to_tensor(inst.gt_proposal_validity, proposal_validity_logits.device) for inst in supervision],
+            dim=0,
+        ).float()
+
+        if self.two_classes:
+            gt_validity = torch.nan_to_num(
+                gt_validity, nan=0.0, posinf=1.0, neginf=0.0
+            ).clamp(0.0, 2.0) # For two_classes, valid values are 0, 1, 2
+
+            gt_validity_indices = gt_validity.long()  # (N,) with values in {0, 1, 2}
+            proposal_loss = F.cross_entropy(
+                proposal_validity_logits,
+                gt_validity_indices,
+            )
+        else:
+            gt_validity = torch.nan_to_num(
+            gt_validity, nan=0.0, posinf=1.0, neginf=0.0
+            ).clamp(0.0, 1.0) # For two_classes, valid values are 0, 1
+
+            proposal_loss = F.binary_cross_entropy_with_logits(
+                proposal_validity_logits,
+                gt_validity,
+            )
+        return proposal_loss
+
     def _compute_losses(
         self,
         membership_logits: torch.Tensor,
@@ -184,117 +245,21 @@ class PhysicsAwareHeads(nn.Module):
             return {}
         if not supervision[0].has("gt_component_membership"):
             return {}
-
-        # Prevent a single unstable batch from poisoning BCE inputs.
-        membership_logits = torch.nan_to_num(membership_logits, nan=0.0, posinf=30.0, neginf=-30.0)
-        proposal_validity_logits = torch.nan_to_num(
-            proposal_validity_logits, nan=0.0, posinf=30.0, neginf=-30.0
-        )
-
-        gt_membership = torch.cat(
-            [self._to_tensor(inst.gt_component_membership, membership_logits.device) for inst in supervision],
-            dim=0,
-        ).float()
-        gt_membership = torch.nan_to_num(gt_membership, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-
-        if supervision[0].has("gt_proposal_validity"):
-            gt_validity = torch.cat(
-                [self._to_tensor(inst.gt_proposal_validity, proposal_validity_logits.device) for inst in supervision],
-                dim=0,
-            ).float()
-        else:
-            gt_validity = torch.ones_like(proposal_validity_logits)
-        gt_validity = torch.nan_to_num(gt_validity, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-
-        if self.two_classes:
-            # If using multi-class membership (MCS/SCS/invalid) use CrossEntropyLoss
-            # which expects class indices rather than one-hot vectors.
-            member_loss, proposal_loss = self._cross_entropy_with_logits(
-                membership_logits=membership_logits,
-                gt_membership=gt_membership,
-                proposal_validity_logits=proposal_validity_logits,
-                gt_validity=gt_validity,
-                component_mask=component_mask,
-            )
-        else:
-            # Else use binary classification for membership (member vs non-member) with BCEWithLogitsLoss.
-            member_loss, proposal_loss = self._binary_cross_entropy_with_logits(
-                membership_logits=membership_logits,
-                gt_membership=gt_membership,
-                proposal_validity_logits=proposal_validity_logits,
-                gt_validity=gt_validity,
-                component_mask=component_mask,
-            )
+        if not supervision[0].has("gt_proposal_validity"):
+            return {}
 
         return {
-            "loss_membership": member_loss * self.membership_loss_weight,
-            "loss_proposal_validity": proposal_loss * self.proposal_loss_weight,
+            "loss_membership": self._membership_loss(
+                membership_logits=membership_logits,
+                component_mask=component_mask,
+                supervision=supervision,
+            ) * self.membership_loss_weight,
+            "loss_proposal_validity": self._validity_loss(
+                proposal_validity_logits=proposal_validity_logits,
+                supervision=supervision,
+            ) * self.proposal_loss_weight,
         }
     
-    def _cross_entropy_with_logits(
-        self,
-        membership_logits: torch.Tensor,
-        gt_membership: torch.Tensor,
-        proposal_validity_logits: torch.Tensor,
-        gt_validity: torch.Tensor,
-        component_mask: torch.Tensor
-    ) -> torch.Tensor:
-        # For multi-class membership (MCS/SCS/invalid), use CrossEntropyLoss which expects class indices.
-        # gt_membership is expected to be (N, C) with values in {0, 1} where 0=invalid, 1=member.
-        # We treat this as binary classification for each component.
-        member_loss = F.binary_cross_entropy_with_logits(
-            membership_logits,
-            gt_membership,
-            reduction="none",
-        )
-        member_loss = (member_loss * component_mask.float()).sum() / component_mask.float().sum().clamp_min(1.0)
-
-        # For proposal validity we have a vector (N,3) of logits for the 3 classes first is SCS, second is MCS, third is invalid.
-        # We convert gt_validity to class indices where 0=SCS, 1=MCS, 2=invalid.
-        # In the gt_validity tensor, we have a vector of (N,) where 1=SCS, 2=MCS, 0=invalid.
-        # We need to convert this to class indices for CrossEntropyLoss.
-        gt_validity_indices = gt_validity.long()  # (N,) with values in {0, 1, 2}
-        proposal_loss = F.cross_entropy(
-            proposal_validity_logits,
-            gt_validity_indices,
-            # reduction="none"
-        )
-
-        return member_loss, proposal_loss
-    
-    def _binary_cross_entropy_with_logits(
-            self,
-            membership_logits: torch.Tensor,
-            gt_membership: torch.Tensor,
-            proposal_validity_logits: torch.Tensor,
-            gt_validity: torch.Tensor,
-            component_mask: torch.Tensor
-        ) -> torch.Tensor:
-        # For membership validity, use pos_weight to handle class imbalance
-        # (many more invalid members than valid ones).
-        # pos_count = (gt_membership == 1).float().sum()
-        # neg_count = (gt_membership == 0).float().sum()
-        # pos_weight = (neg_count / pos_count.clamp_min(1.0)).clamp(max=20.0)
-
-        member_loss = F.binary_cross_entropy_with_logits(
-            membership_logits,
-            gt_membership,
-            reduction="none",
-        )
-        member_loss = (member_loss * component_mask.float()).sum() / component_mask.float().sum().clamp_min(1.0)
-
-        # For proposal validity, use pos_weight to handle class imbalance
-        # (many more invalid proposals than valid ones).
-        # pos_count = (gt_validity == 1).float().sum()
-        # neg_count = (gt_validity == 0).float().sum()
-        # pos_weight = (neg_count / pos_count.clamp_min(1.0)).clamp(max=20.0)
-
-        proposal_loss = F.binary_cross_entropy_with_logits(
-            proposal_validity_logits,
-            gt_validity,
-        )
-        return member_loss, proposal_loss
-
     @staticmethod
     def _to_tensor(value, device: torch.device) -> torch.Tensor:
         if hasattr(value, "tensor"):
