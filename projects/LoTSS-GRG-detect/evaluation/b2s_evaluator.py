@@ -119,11 +119,14 @@ class B2SEvaluator(DatasetEvaluator):
             "Validity Precision",
             "Validity Recall",
             "Validity F1",
+        ]
+
+        monitoring_metrics = [
             "Validity GT Positive Rate",
             "Validity Pred Positive Rate",
             "Validity Logit Mean",
             "Validity Logit Std",
-            "Validity PR-AUC",
+            "Validity PR-AUC"
         ]
 
         # Aggregate metrics
@@ -145,6 +148,7 @@ class B2SEvaluator(DatasetEvaluator):
 
         membership_results = {k: results[k] for k in membership_results_str}
         validity_results = {k: results[k] for k in validity_results_str}
+        monitoring_metrics_results = {k: results[k] for k in monitoring_metrics}
         
         # Log the results in a nice table format
         self._logger.info(
@@ -160,6 +164,10 @@ class B2SEvaluator(DatasetEvaluator):
             "\n"
             +
             create_small_table(validity_results)
+            +
+            "\n"
+            +
+            create_small_table(monitoring_metrics_results)
         )
         return copy.deepcopy({
             "B2S": results
@@ -310,3 +318,286 @@ class B2SEvaluator(DatasetEvaluator):
     def _fn(self, pred, gt):
         """All missed predictions"""
         return np.logical_and(pred == 0, gt == 1).astype(int)
+
+
+class B2SMultiClassEvaluator(B2SEvaluator):
+    """
+    Extends B2SEvaluator for three-class proposal validity:
+        class 0 = invalid, class 1 = SCS, class 2 = MCS
+
+    Expects pred_proposal_validity to be (N, 3) softmax probabilities
+    (produced by _attach_predictions when two_classes=True).
+    Expects gt_proposal_validity to be (N,) integer class indices {0, 1, 2}.
+
+    Metrics:
+      - Per-class Jaccard, Precision, Recall, F1  (one-vs-rest)
+      - Micro accuracy and Macro F1
+      - Cohen's Kappa            — near 0: model just learned the class prior
+      - GT vs predicted class rates — direct overfitting signal (pred rate >> GT rate)
+      - Normalized prediction entropy — near 0: model always collapses to one class
+    """
+
+    CLASS_NAMES = ["invalid", "SCS", "MCS"]
+
+    def __init__(self, membership_threshold: float = 0.5):
+        # validity_threshold is not used for argmax classification
+        super().__init__(validity_threshold=0.5, membership_threshold=membership_threshold)
+        self._logger = setup_logger(
+            name="LoTSS-B2S-detect.evaluation.B2SMultiClassEvaluator",
+            termcolor="cyan",
+        )
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def evaluate(self):
+        if len(self._predictions) == 0:
+            self._logger.warning("[B2SMultiClassEvaluator] Did not receive valid predictions.")
+            return {}
+
+        (
+            tp_membership,
+            fp_membership,
+            fn_membership,
+            tp_validity,
+            fp_validity,
+            fn_validity,
+            per_class_tp,
+            per_class_fp,
+            per_class_fn,
+            diagnostics,
+        ) = self._gather_predictions()
+
+        # ---- Membership (identical to parent) -------------------------
+        membership_jaccard   = self._jaccard(tp_membership, fp_membership, fn_membership)
+        membership_precision = self._precision(tp_membership, fp_membership)
+        membership_recall    = self._recall(tp_membership, fn_membership)
+        membership_f1        = self._f1(membership_precision, membership_recall)
+
+        # ---- Validity (identical to parent) -------------------------
+        validity_jaccard   = self._jaccard(tp_validity, fp_validity, fn_validity)
+        validity_precision = self._precision(tp_validity, fp_validity)
+        validity_recall    = self._recall(tp_validity, fn_validity)
+        validity_f1        = self._f1(validity_precision, validity_recall)
+
+        # ---- Per-class validity metrics (one-vs-rest) -----------------
+        per_class_metrics = {}
+        per_class_f1s = []
+        for k, name in enumerate(self.CLASS_NAMES):
+            p  = self._precision(per_class_tp[k], per_class_fp[k])
+            r  = self._recall(per_class_tp[k], per_class_fn[k])
+            f1 = self._f1(p, r)
+            j  = self._jaccard(per_class_tp[k], per_class_fp[k], per_class_fn[k])
+            per_class_metrics[name] = {"Jaccard": j, "Precision": p, "Recall": r, "F1": f1}
+            per_class_f1s.append(f1)
+
+        macro_f1 = float(np.mean(per_class_f1s))
+
+        # ---- Flat results dict (detectron2-compatible) ----------------
+        results = {
+            # Membership metrics
+            "Membership Jaccard":   membership_jaccard,
+            "Membership Precision": membership_precision,
+            "Membership Recall":    membership_recall,
+            "Membership F1":        membership_f1,
+
+            # Validity metrics
+            "Validity Jaccard":     validity_jaccard,
+            "Validity Precision":   validity_precision,
+            "Validity Recall":      validity_recall,
+            "Validity F1":          validity_f1,
+
+            # Global validity diagnostics
+            # (not really metrics, but important for
+            # interpreting results and diagnosing overfitting)
+            "Validity Micro Accuracy": diagnostics["micro_accuracy"],
+            "Validity Macro F1":       macro_f1,
+            "Validity Cohen Kappa":    diagnostics["cohen_kappa"],
+            "Validity Norm Entropy":   diagnostics["norm_pred_entropy"],
+        }
+        for name in self.CLASS_NAMES:
+            for metric, val in per_class_metrics[name].items():
+                results[f"Validity {name} {metric}"] = val
+        for name in self.CLASS_NAMES:
+            results[f"GT Rate {name}"]   = diagnostics["gt_class_rates"][name]
+            results[f"Pred Rate {name}"] = diagnostics["pred_class_rates"][name]
+
+        # ---- Logging --------------------------------------------------
+        self._logger.info(
+            "B2S Multi-Class Evaluation - Component Membership:\n"
+            + create_small_table({
+                "Jaccard":   membership_jaccard,
+                "Precision": membership_precision,
+                "Recall":    membership_recall,
+                "F1":        membership_f1,
+            })
+        )
+        self._logger.info(
+            "B2S Multi-Class Evaluation - Proposal Validity:\n"
+            + create_small_table({
+                "Jaccard":   validity_jaccard,
+                "Precision": validity_precision,
+                "Recall":    validity_recall,
+                "F1":        validity_f1,
+            })
+        )
+        for name in self.CLASS_NAMES:
+            self._logger.info(
+                f"B2S Multi-Class Evaluation - Validity [{name}]:\n"
+                + create_small_table(per_class_metrics[name])
+            )
+
+        self._logger.info(
+            "B2S Multi-Class Evaluation - Validity Aggregate:\n"
+            + create_small_table({
+                "Micro Accuracy": diagnostics["micro_accuracy"],
+                "Macro F1":       macro_f1,
+                "Cohen Kappa":    diagnostics["cohen_kappa"],
+            })
+        )
+        # Class balance table: most important overfitting diagnostic.
+        # If Pred Rate for a class >> GT Rate, the model has collapsed onto it.
+        # Normalized entropy near 0 confirms the collapse.
+        balance_table = {}
+        for name in self.CLASS_NAMES:
+            balance_table[f"GT {name}"]   = diagnostics["gt_class_rates"][name]
+            balance_table[f"Pred {name}"] = diagnostics["pred_class_rates"][name]
+        balance_table["Norm Entropy (0=collapse, 1=uniform)"] = diagnostics["norm_pred_entropy"]
+        self._logger.info(
+            "B2S Multi-Class Evaluation - Class Balance (overfitting signal):\n"
+            + create_small_table(balance_table)
+        )
+
+        return copy.deepcopy({"B2S": results})
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _gather_predictions(self):
+        tp_membership_list = []
+        fp_membership_list = []
+        fn_membership_list = []
+
+        tp_validity_list = []
+        fp_validity_list = []
+        fn_validity_list = []
+
+        per_class_tp_lists = [[] for _ in range(3)]
+        per_class_fp_lists = [[] for _ in range(3)]
+        per_class_fn_lists = [[] for _ in range(3)]
+
+        gt_class_list   = []
+        pred_class_list = []
+        pred_probs_list = []  # (N, 3) softmax probs — used for entropy
+
+        for prediction in self._predictions:
+            gt_proposal_validity   = self._to_numpy(prediction["gt_proposal_validity"]) # (N,)
+            gt_component_membership = self._to_numpy(prediction["gt_component_membership"]) # (N, C)
+
+            instances = prediction["instances"]
+            pred_proposal_validity  = self._to_numpy(instances.pred_proposal_validity)   # (N, 3)
+            pred_component_membership = self._to_numpy(instances.pred_component_membership)  # (N, C)
+
+            # No need for thresholding here since we are doing argmax classification for validity
+            # We are going to set all predicted classes that are not the invalid class (0)
+            # to 1, and also do this with the ground truth for consistency in TP/FP/FN calculations.
+            # This allows us to gauge how well the model distinguishes valid (SCS/MCS) vs invalid proposals,
+            # which is the most important aspect of validity prediction.
+            pred_class = np.argmax(pred_proposal_validity, axis=-1).astype(np.int32) # (N,)
+            pred_class_binary = np.where(pred_class == 0, 0, 1)  # Convert to binary for TP/FP/FN (0=invalid, 1=valid)
+            gt_proposal_validity_binary = np.where(gt_proposal_validity == 0, 0, 1).astype(np.int32)  # Convert to binary for TP/FP
+            
+            # We treat membership the same as in the binary case,
+            # since it's still a multi-label prediction (multiple components can belong to a proposal).
+            pred_component_membership_binary = (pred_component_membership >= self._membership_threshold).astype(np.int32)  # (N, C)
+
+            tp_membership_list.append(self._tp(pred_component_membership_binary, gt_component_membership))
+            fp_membership_list.append(self._fp(pred_component_membership_binary, gt_component_membership))
+            fn_membership_list.append(self._fn(pred_component_membership_binary, gt_component_membership))
+            tp_validity_list.append(self._tp(pred_class_binary, gt_proposal_validity_binary))
+            fp_validity_list.append(self._fp(pred_class_binary, gt_proposal_validity_binary))
+            fn_validity_list.append(self._fn(pred_class_binary, gt_proposal_validity_binary))
+
+            gt_class_list.append(gt_proposal_validity)
+            pred_class_list.append(pred_class)
+            pred_probs_list.append(pred_proposal_validity.reshape(-1, 3))
+
+            for k in range(3):
+                gt_k   = (gt_proposal_validity == k).astype(np.int32)
+                pred_k = (pred_class == k).astype(np.int32)
+                per_class_tp_lists[k].append(self._tp(pred_k, gt_k))
+                per_class_fp_lists[k].append(self._fp(pred_k, gt_k))
+                per_class_fn_lists[k].append(self._fn(pred_k, gt_k))
+
+        tp_membership = self._flatten_and_concat(tp_membership_list)
+        fp_membership = self._flatten_and_concat(fp_membership_list)
+        fn_membership = self._flatten_and_concat(fn_membership_list)
+
+        tp_validity = self._flatten_and_concat(tp_validity_list)
+        fp_validity = self._flatten_and_concat(fp_validity_list)
+        fn_validity = self._flatten_and_concat(fn_validity_list)
+
+        per_class_tp = [self._flatten_and_concat(per_class_tp_lists[k]) for k in range(3)]
+        per_class_fp = [self._flatten_and_concat(per_class_fp_lists[k]) for k in range(3)]
+        per_class_fn = [self._flatten_and_concat(per_class_fn_lists[k]) for k in range(3)]
+
+        gt_class   = np.concatenate(gt_class_list)   if gt_class_list   else np.array([], dtype=np.int32)
+        pred_class = np.concatenate(pred_class_list) if pred_class_list else np.array([], dtype=np.int32)
+        pred_probs = np.concatenate(pred_probs_list, axis=0) if pred_probs_list else np.zeros((0, 3), dtype=np.float32)
+
+        n = len(gt_class)
+        gt_class_rates   = {name: float((gt_class   == k).mean()) if n > 0 else 0.0 for k, name in enumerate(self.CLASS_NAMES)}
+        pred_class_rates = {name: float((pred_class == k).mean()) if n > 0 else 0.0 for k, name in enumerate(self.CLASS_NAMES)}
+
+        micro_accuracy = float((gt_class == pred_class).mean()) if n > 0 else 0.0
+        kappa          = self._cohen_kappa(gt_class, pred_class, n_classes=3)
+
+        # Prediction entropy per sample, normalised to [0, 1] where:
+        #   0 = model always picks the same class  (collapsed / overfit)
+        #   1 = model is perfectly uncertain about all classes
+        eps = 1e-9
+        entropy     = -np.sum(pred_probs * np.log(pred_probs + eps), axis=-1)  # (N,)
+        max_entropy = np.log(3)
+        norm_entropy = float(entropy.mean() / max_entropy) if n > 0 else 0.0
+
+        diagnostics = {
+            "gt_class_rates":   gt_class_rates,
+            "pred_class_rates": pred_class_rates,
+            "micro_accuracy":   micro_accuracy,
+            "cohen_kappa":      kappa,
+            "norm_pred_entropy": norm_entropy,
+        }
+
+        return (
+            tp_membership,
+            fp_membership,
+            fn_membership,
+            tp_validity,
+            fp_validity,
+            fn_validity,
+            per_class_tp,
+            per_class_fp,
+            per_class_fn,
+            diagnostics,
+        )
+
+    @staticmethod
+    def _cohen_kappa(gt: np.ndarray, pred: np.ndarray, n_classes: int) -> float:
+        """
+        Cohen's Kappa corrected for chance agreement.
+        κ ≈ 1  → near-perfect agreement
+        κ ≈ 0  → model performs at chance level (just learned the class prior)
+        κ < 0  → model is systematically wrong
+        """
+        n = len(gt)
+        if n == 0:
+            return 0.0
+        p_o = float(np.sum(gt == pred)) / n
+        p_e = sum(
+            (float(np.sum(gt == k)) / n) * (float(np.sum(pred == k)) / n)
+            for k in range(n_classes)
+        )
+        denom = 1.0 - p_e
+        return (p_o - p_e) / denom if denom > 1e-9 else 0.0
