@@ -16,6 +16,7 @@ def add_lotss_grg_config(cfg):
     cfg.MODEL.FUSION_MODULE.TYPE = "AttentionFusionModule"
     cfg.MODEL.FUSION_MODULE.DROPOUT = 0.0
     cfg.MODEL.FUSION_MODULE.NUM_HEADS = 8
+    cfg.MODEL.FUSION_MODULE.BIDIRECTIONAL = False  # Whether to use bidirectional attention between physics and ROI features
 
     # ROI Align configuration
     cfg.MODEL.ROI_ALIGN = CN()
@@ -31,6 +32,7 @@ def add_lotss_grg_config(cfg):
     cfg.MODEL.VALIDITY_HEAD.HIDDEN_DIM = 256
     cfg.MODEL.VALIDITY_HEAD.SCORE_THRESH_TEST = 0.5
     cfg.MODEL.VALIDITY_HEAD.DECOUPLE_PROJECTION = True
+    cfg.MODEL.VALIDITY_HEAD.TWO_CLASSES = False  # Whether to use two classes (MCS/SCS) or binary (member/non-member)
 
     # Membership head for component classification
     cfg.MODEL.MEMBERSHIP_HEAD = CN()
@@ -49,10 +51,12 @@ def add_lotss_grg_config(cfg):
     cfg.TRAINER = CN()
     cfg.TRAINER.NAME = "GRGTrainer"
 
-    cfg.DATASETS = CN()
+    # Freeze backbone until this global iteration. Set to 0 to disable.
+    cfg.SOLVER.BACKBONE_FREEZE_ITERS = 0
+
+    cfg.TEST.EVALUATOR = "B2SEvaluator"  # or 'B2SMultiClassEvaluator' if using two_classes=True
+
     cfg.DATASETS.POSITIVE_FRACTION = 0.20  # Fraction of positive samples in each batch pos:neg - 1:5
-    cfg.DATASETS.TRAIN = ("",)
-    cfg.DATASETS.TEST = ("",)
     cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN = 100000
     cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST = 100000
     

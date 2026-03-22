@@ -28,7 +28,6 @@ class AttentionFusionModule(nn.Module):
             nn.LayerNorm(roi_feature_dim),
             nn.Linear(roi_feature_dim, physics_fan_feature_dim)
         )
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, physics_fan_feature_dim))  # Learnable CLS token
 
         # --- Cross-attention blocks ---
         self.transformer_block = TransformerBlock(
@@ -70,7 +69,8 @@ class AttentionFusionModule(nn.Module):
         roi_spatial = roi_features.reshape(n, h * w, feat_dim)
 
         # --- ADD CLS TOKEN ---
-        cls_token = self.cls_token.expand(n, -1, -1)  # (N, 1, C)
+        # Use mean-pooled token as CLS since it provides a global summary of the RoI
+        cls_token = roi_spatial.mean(dim=1, keepdim=True)  # (N, 1, C)
         roi_spatial = torch.cat([cls_token, roi_spatial], dim=1)  # (N, 1 + H*W, C)
 
         # Add positional encoding ase we are using roi_spatial as keys/values in attention.

@@ -23,10 +23,12 @@ def load_coco_json_xyxy(
     """
     if ds_type == "standard":
         extra_annotation_keys = []  # No extra keys for standard dataset
+    elif ds_type == "b2s_masked_rcnn":
+        extra_annotation_keys = ["instance_positions"]  # Only instance positions for masked RCNN dataset
     elif ds_type == "b2s":
         extra_annotation_keys = ["gt_proposal_validity", "gt_component_membership"]
     else:
-        raise ValueError(f"Unknown dataset type: {ds_type}, must be 'standard' or 'b2s'")
+        raise ValueError(f"Unknown dataset type: {ds_type}, must be 'standard', 'b2s', or 'b2s_masked_rcnn'")
     
     # Load using standard loader
     dataset_dicts = load_coco_json(json_file, image_root, dataset_name, extra_annotation_keys)
@@ -40,15 +42,10 @@ def load_coco_json_xyxy(
     
     # Add metadata to each dataset_dict
     for dataset_dict in dataset_dicts:
-        # Fix bbox_mode for all annotations
-        if ds_type == "standard":
-            for anno in dataset_dict.get("annotations", []):
+        # Dataset bboxes are stored in XYXY, so enforce this mode for Detectron2 transforms.
+        for anno in dataset_dict.get("annotations", []):
+            if "bbox" in anno:
                 anno["bbox_mode"] = BoxMode.XYXY_ABS
-        elif ds_type == "b2s":
-            # For B2S dataset, we remove 'bbox_mode' to avoid confusion since we use custom proposals
-            for anno in dataset_dict.get("annotations", []):
-                if "bbox_mode" in anno:
-                    del anno["bbox_mode"]
         
         # Add metadata if available
         img_id = dataset_dict['image_id']
@@ -70,6 +67,12 @@ def register_dataset(dataset: dict, dataset_name: str, data_root: str, ds_type: 
     if ds_type == "standard":
         logger.info(f"  BBox format: XYXY_ABS")
     logger.info(f"  Dataset type: {ds_type}")
+
+    # Allow rerunning registration in the same process (e.g., notebook/debug session)
+    if dataset_name in DatasetCatalog.list():
+        DatasetCatalog.remove(dataset_name)
+    if dataset_name in MetadataCatalog.list():
+        MetadataCatalog.remove(dataset_name)
     
     # Register with custom loader that handles XYXY bboxes
     DatasetCatalog.register(
@@ -82,7 +85,6 @@ def register_dataset(dataset: dict, dataset_name: str, data_root: str, ds_type: 
         json_file=ann_file,
         image_root=img_dir,
         evaluator_type="coco",
-        thing_classes=["radio_source"] if ds_type == "b2s" else ["GRG"]
     )
     
     logger.info(f"Successfully registered dataset: {dataset_name}")
