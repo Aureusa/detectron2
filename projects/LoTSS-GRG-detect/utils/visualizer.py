@@ -333,6 +333,17 @@ class Visualizer:
             assert len(labels) == num_instances
         if assigned_colors is None:
             assigned_colors = [random_color(rgb=True, maximum=1) for _ in range(num_instances)]
+
+            if self.classes is not None:
+                if len(self.classes) == 2:
+                    color_mapping = {
+                        "SCS": (1.0, 1.0, 1.0), # White for SCS
+                        "MCS": (1.0, 1.0, 0.0), # Yellow for MCS
+                    }
+                    assigned_colors = [color_mapping.get(label, (1.0, 1.0, 1.0)) for label in labels]
+                else:
+                    color_mapping = {class_id: random_color(rgb=True, maximum=1) for class_id in self.classes.values()}
+                assigned_colors = [color_mapping.get(label, (1.0, 1.0, 1.0)) for label in labels]
         if num_instances == 0:
             return self.output
 
@@ -387,7 +398,7 @@ class Visualizer:
                     text_pos,
                     color=lighter_color,
                     horizontal_alignment=horiz_align,
-                    font_size=5,
+                    font_size=5 if self.classes is None else 9,
                 )
 
         # draw keypoints
@@ -640,22 +651,24 @@ class Visualizer:
             x_min, y_min, x_max, y_max = box
             plotting_info["boxes"].append([x_min, y_min, x_max, y_max])
 
-            if self.classes is not None:
-                # Get the class id for the proposal box
-                for class_name, class_id in self.classes.items():
-                    if class_id == prop_val:
-                        label = f"{class_name}"
-                        break
-            else:
-                comp_in_prop = np.where(component_membership[i])[0]
-                comps_xy = []
-                # Always keep one label per box to satisfy overlay_instances.
-                label = "GT" if gt else "RS"
-                for c in components:
-                    if c['component_id'] in comp_in_prop:
-                        comps_xy.append(c['xy'])
-                        if gt and label == "GT":
-                            label = c.get('source_name', "GT")
+            comp_in_prop = np.where(component_membership[i])[0]
+            comps_xy = []
+            label = "GT" if gt else "RS"
+            class_label_set_flag = False
+            for c in components:
+                if c['component_id'] in comp_in_prop:
+                    comps_xy.append(c['xy'])
+
+                    if self.classes is not None and not class_label_set_flag:
+                        # Get the class id for the proposal box
+                        for class_name, class_id in self.classes.items():
+                            if class_id == prop_val:
+                                label = f"{class_name}"
+                                class_label_set_flag = True
+                                break
+
+                    if gt and label == "GT":
+                        label = c.get('source_name', "GT")
 
             plotting_info["labels"].append(label)
             plotting_info["components_xy"].append(comps_xy)

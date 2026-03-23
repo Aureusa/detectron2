@@ -1,4 +1,3 @@
-import logging
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import torch
@@ -9,10 +8,8 @@ from detectron2.data.detection_utils import convert_image_to_rgb
 from detectron2.layers import move_device_like
 from detectron2.structures import ImageList, Instances
 from detectron2.utils.events import get_event_storage
-from detectron2.utils.logger import log_first_n
 
 from detectron2.modeling.backbone import Backbone, build_backbone
-from detectron2.modeling.postprocessing import detector_postprocess
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
 
 from ..tail import build_physics_fan, build_fusion_module
@@ -41,7 +38,7 @@ class TailedRCNN(nn.Module):
             physics_fan: a PhysicsFAN module that provides additional features
             fusion_module: a fusion module that combines ROI features and PhysicsFAN features
             roi_align: a ROI Align module that performs ROI pooling
-            roi_heads: a ROI head that performs per-region computation and prediction
+            heads: a ROI head that performs per-region computation and prediction
             pixel_mean, pixel_std: list or tuple with #channels element, representing
                 the per-channel mean and std to be used to normalize the input image
             input_format: describe the meaning of channels of input. Needed by visualization

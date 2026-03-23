@@ -33,6 +33,8 @@ class AttentionFusionModule(nn.Module):
         self.transformer_block = TransformerBlock(
             embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout
         )
+        self.pre_transformer_norm = nn.LayerNorm(physics_fan_feature_dim)
+
         if bidirectional:
             self.transformer_block_roi = TransformerBlock(
                 embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout
@@ -44,6 +46,8 @@ class AttentionFusionModule(nn.Module):
                 nn.Sigmoid(),
             )
             self.fusion_context_proj = nn.Linear(physics_fan_feature_dim, physics_fan_feature_dim)
+
+            self.fusion_norm = nn.LayerNorm(physics_fan_feature_dim)
 
         self.bidirectional = bidirectional
 
@@ -114,7 +118,7 @@ class AttentionFusionModule(nn.Module):
         key = roi_spatial  # (N, 1 + H*W, D)
 
         physics_attends_to_roi, _ = self.transformer_block(
-            query, key, key
+            self.pre_transformer_norm(query), self.pre_transformer_norm(key), self.pre_transformer_norm(key)
             # No key_padding_mask needed: all spatial positions are valid.
         )  # (N, C_comp, D)
 

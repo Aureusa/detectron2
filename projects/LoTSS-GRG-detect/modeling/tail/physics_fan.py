@@ -1,24 +1,9 @@
-import logging
-import numpy as np
-from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
 from detectron2.config import configurable
-from detectron2.data.detection_utils import convert_image_to_rgb
-from detectron2.layers import move_device_like
-from detectron2.structures import ImageList, Instances
-from detectron2.utils.events import get_event_storage
-from detectron2.utils.logger import log_first_n
 
-from detectron2.modeling.backbone import Backbone, build_backbone
-from detectron2.modeling.postprocessing import detector_postprocess
-from detectron2.modeling.proposal_generator import build_proposal_generator
-from detectron2.modeling.roi_heads import build_roi_heads
-from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
-from detectron2.modeling.meta_arch.rcnn import GeneralizedRCNN
-
-from ..vanila import TransformerBlock, MLP
+from ..vanila import TransformerBlock, PhysicsFeatureEmbedder
 
 
 class PhysicsFAN(nn.Module):
@@ -38,8 +23,20 @@ class PhysicsFAN(nn.Module):
         self.num_physics_features = num_physics_features
         self.embedding_dim = embedding_dim
 
-        self.embedding_mlp = MLP(input_dim=num_physics_features, hidden_dim=embedding_dim, output_dim=embedding_dim, dropout=embedding_dropout)
-        self.transformer_block = TransformerBlock(embed_dim=embedding_dim, num_heads=num_attention_heads, dropout=attention_dropout)
+        self.physics_feature_embedder = PhysicsFeatureEmbedder(
+            input_dim=num_physics_features,
+            hidden_dim=embedding_dim,
+            output_dim=embedding_dim,
+            dropout=embedding_dropout
+        )
+        
+        self.embedding_norm = nn.LayerNorm(embedding_dim)
+
+        self.transformer_block = TransformerBlock(
+            embed_dim=embedding_dim,
+            num_heads=num_attention_heads,
+            dropout=attention_dropout
+        )
 
         # self.component_embedding = nn.Embedding(num_components, embedding_dim)  # Learnable embeddings for each component type
 
@@ -76,8 +73,11 @@ class PhysicsFAN(nn.Module):
         # component_embeds = self.component_embedding(component_ids)  # (C, embedding_dim)
         # component_embeds = component_embeds.unsqueeze(0).unsqueeze(0)  # (1, 1, C, embedding_dim) -> broadcast to (B, P, C, embedding_dim)
 
-        embedded_features = self.embedding_mlp(features)  # (B, P, C, embedding_dim) - Batch size, P proposals, C components, embedding_dim features
+        embedded_features = self.physics_feature_embedder(features)  # (B, P, C, embedding_dim) - Batch size, P proposals, C components, embedding_dim features
         # embedded_features += component_embeds  # Add component type embeddings
+
+        embedded_features = self.embedding_norm(embedded_features)  # Apply layer normalization
+
         unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
         embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
 

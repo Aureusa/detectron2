@@ -23,7 +23,7 @@ MODEL:
     POOLER_TYPE: "ROIAlignV2"  # Use ROIAlignV2 for better performance with small objects
   VALIDITY_HEAD:
     LOSS_WEIGHT: 1.0  # Weight for the validity classification loss
-    HIDDEN_DIM: 256  # Hidden dimension for the validity head MLP
+    HIDDEN_DIM: 1024  # Hidden dimension for the validity head MLP
     SCORE_THRESH_TEST: 0.5  # Threshold for filtering proposals based on validity score during testing
     DECOUPLE_PROJECTION: True  # Use a separate projection branch for validity features
 
@@ -32,8 +32,7 @@ MODEL:
     TWO_CLASSES: False
   MEMBERSHIP_HEAD:
     LOSS_WEIGHT: 1.0  # Weight for the membership classification loss
-    HIDDEN_DIM: 256  # Hidden dimension for the membership head MLP
-    NUM_HEADS: 4  # Number of attention heads for the validity head
+    HIDDEN_DIM: 1024  # Hidden dimension for the membership head MLP
     DROPOUT: 0.1  # Dropout for the validity head MLP
     SCORE_THRESH_TEST: 0.5  # Threshold for filtering proposals based on membership score during testing
   # Backward compatibility (doesn't do anything) ---
@@ -57,7 +56,7 @@ SOLVER:
   IMS_PER_BATCH: 1
 
   # Freeze ResNet backbone for a given number of iterations, then unfreeze for fine-tuning.
-  BACKBONE_FREEZE_ITERS: 30000
+  BACKBONE_FREEZE_ITERS: 0
 
   BASE_LR: 0.001
   STEPS: (26800, 42400, 84800)  # Adjust based on your dataset size and desired schedule
@@ -76,7 +75,7 @@ INPUT:
 TEST:
   EVAL_PERIOD: 10000  # Evaluate every 10000 iterations
   EVALUATOR: "B2SEvaluator"
-OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/racun_baseline/"
+OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/racun_baseline_v5.2/"
 
 
 # BASELINE MODEL CONFIG FOR RACUN:
@@ -93,3 +92,9 @@ OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/racun_ba
 # - Freeze ResNet backbone till 30k iterations, then unfreeze for fine-tuning.
 #   This allows the model to first learn good ROI and attention features before
 #   fine-tuning the backbone on the specific dataset.
+# - Replaced ReLU wih GELU in the PhysicsEmbeddingMLP, ResidualBlockMLP and straightenned
+#   out the Transformer block (also GELU and standard FFN). Added pre-norm to the transformer.
+#   Also added norm layer before feeding to the transformer both in PhysicsFAN and AttentionFusionModule.
+# - Removed attention from the membership head.
+# - Increased the hidden dim from 256 to 1024 on both heads
+# - Unfroze the model from the start

@@ -6,7 +6,7 @@ from torch import nn
 
 from detectron2.structures import Instances
 
-from ..vanila import ResidualMLPBlock, ComponentAttention
+from ..vanila import ResidualMLPBlock
 
 
 class MembershipHead(nn.Module):
@@ -22,22 +22,18 @@ class MembershipHead(nn.Module):
     Input:  (N, C, input_dim)   — shared-projected features
     Output: (N, C)              — per-component membership logits
     """
-    def __init__(self, input_dim: int, hidden_dim: int = 256,
-                 num_heads: int = 4, dropout: float = 0.0):
+    def __init__(self, input_dim: int, hidden_dim: int = 256, dropout: float = 0.0):
         super().__init__()
-        # self.proj = nn.Linear(input_dim, hidden_dim)
-        self.attn = ComponentAttention(hidden_dim, num_heads=num_heads, dropout=dropout)
+        self.proj = nn.Linear(input_dim, hidden_dim)
         self.blocks = nn.Sequential(
             ResidualMLPBlock(hidden_dim, dropout=dropout),
             ResidualMLPBlock(hidden_dim, dropout=dropout),
         )
         self.out = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor,
-                key_padding_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (N, C, input_dim) -> logits: (N, C)
-        # x = self.proj(x)          # (N, C, H)
-        x = self.attn(x, key_padding_mask=key_padding_mask)  # (N, C, H)
+        x = self.proj(x)          # (N, C, H)
         x = self.blocks(x)        # (N, C, H)
         return self.out(x).squeeze(-1)  # (N, C)
 
@@ -107,7 +103,6 @@ class PhysicsAwareHeads(nn.Module):
         hidden_dim: int = 256,
         membership_head_hidden_dim: int = 256,
         proposal_head_hidden_dim: int = 256,
-        num_heads: int = 4,
         dropout: float = 0.0,
         membership_loss_weight: float = 1.0,
         proposal_loss_weight: float = 1.0,
@@ -131,7 +126,6 @@ class PhysicsAwareHeads(nn.Module):
         self.membership_head = MembershipHead(
             input_dim=hidden_dim,
             hidden_dim=membership_head_hidden_dim,
-            num_heads=num_heads,
             dropout=dropout,
         )
         self.proposal_validity_head = ProposalValidityHead(
@@ -192,6 +186,48 @@ class PhysicsAwareHeads(nn.Module):
             gt_membership,
             reduction="none",
         )
+
+        # NEW ---------------
+        # valid_mask = component_mask.bool()
+
+        # # --- HARD NEGATIVE MINING (PER PROPOSAL) ---
+        # # Compute one membership loss per proposal, then average across proposals
+        # # so large/easy proposals do not dominate global hard-negative selection.
+        # proposal_losses = []
+        # num_proposals = member_loss.shape[0]
+        # for proposal_idx in range(num_proposals):
+        #     proposal_loss = member_loss[proposal_idx]
+        #     proposal_valid_mask = valid_mask[proposal_idx]
+        #     proposal_gt = gt_membership[proposal_idx]
+
+        #     if not proposal_valid_mask.any():
+        #         continue
+
+        #     proposal_pos_mask = (proposal_gt == 1) & proposal_valid_mask
+        #     proposal_neg_mask = (proposal_gt == 0) & proposal_valid_mask
+
+        #     proposal_pos_loss = proposal_loss[proposal_pos_mask]
+        #     proposal_neg_loss = proposal_loss[proposal_neg_mask]
+
+        #     if proposal_pos_loss.numel() > 0 and proposal_neg_loss.numel() > 0:
+        #         k = min(proposal_neg_loss.numel(), proposal_pos_loss.numel() * 3)  # 1:3 ratio
+        #         hard_neg_loss, _ = torch.topk(proposal_neg_loss, k)
+        #         selected_loss = torch.cat([proposal_pos_loss, hard_neg_loss])
+        #         proposal_losses.append(selected_loss.mean())
+        #     elif proposal_pos_loss.numel() > 0:
+        #         # Edge case: all valid labels are positive in this proposal.
+        #         proposal_losses.append(proposal_pos_loss.mean())
+        #     else:
+        #         # No positives in this proposal: fall back to OLD masked-mean behavior.
+        #         proposal_losses.append(proposal_loss[proposal_valid_mask].mean())
+
+        # if len(proposal_losses) == 0:
+        #     # Fully empty/invalid batch safety fallback.
+        #     num_valid = valid_mask.float().sum().clamp_min(1.0)
+        #     return (member_loss * valid_mask.float()).sum() / num_valid
+
+        # return torch.stack(proposal_losses).mean()
+    
         member_loss = (member_loss * component_mask.float()).sum() / component_mask.float().sum().clamp_min(1.0)
         return member_loss
     
@@ -212,7 +248,7 @@ class PhysicsAwareHeads(nn.Module):
 
         if self.two_classes:
             gt_validity = torch.nan_to_num(
-                gt_validity, nan=0.0, posinf=1.0, neginf=0.0
+                gt_validity, nan=0.0, posinf=2.0, neginf=0.0
             ).clamp(0.0, 2.0) # For two_classes, valid values are 0, 1, 2
 
             gt_validity_indices = gt_validity.long()  # (N,) with values in {0, 1, 2}
@@ -321,7 +357,7 @@ class PhysicsAwareHeads(nn.Module):
         # Membership head expects invalid-component mask for key_padding_mask
         # (True = ignore), so we invert the valid mask.
         membership_logits = self.membership_head(
-            x_membership, key_padding_mask=~component_mask
+            x_membership
         )  # (N, C)
         membership_logits = membership_logits.clamp(-30, 30) # Clamp logits before sigmoid to prevent NaNs in extreme cases.
 
@@ -394,7 +430,6 @@ def build_physics_heads(cfg, input_dim) -> PhysicsAwareHeads:
     proposal_head_hidden_dim = cfg.MODEL.VALIDITY_HEAD.HIDDEN_DIM
     membership_loss_weight = cfg.MODEL.MEMBERSHIP_HEAD.LOSS_WEIGHT
     proposal_loss_weight = cfg.MODEL.VALIDITY_HEAD.LOSS_WEIGHT
-    num_heads = cfg.MODEL.MEMBERSHIP_HEAD.NUM_HEADS
     dropout = cfg.MODEL.MEMBERSHIP_HEAD.DROPOUT
     decouple_validity_projection = cfg.MODEL.VALIDITY_HEAD.DECOUPLE_PROJECTION
     two_classes = cfg.MODEL.VALIDITY_HEAD.TWO_CLASSES # Whether to treat membership as binary (member vs non-member) or multi-class (MCS/SCS/invalid)
@@ -403,7 +438,6 @@ def build_physics_heads(cfg, input_dim) -> PhysicsAwareHeads:
         hidden_dim=hidden_dim,
         membership_head_hidden_dim=membership_head_hidden_dim,
         proposal_head_hidden_dim=proposal_head_hidden_dim,
-        num_heads=num_heads,
         dropout=dropout,
         membership_loss_weight=membership_loss_weight,
         proposal_loss_weight=proposal_loss_weight,
