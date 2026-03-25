@@ -409,20 +409,46 @@ def main():
 		callbacks=None,
 	)
 
+	best_assoc_f1 = -1
+	best_mcs_assoc_f1 = -1
+	best_combo = None
 	results = {}
-	for m_thresh in membership_threshold:
-		key = f"membership_threshold_{m_thresh:.1f}"
-		evaluator._membership_threshold = m_thresh
-		results[key] = evaluator.evaluate()
-	
 	if not MULTICLASS_FLAG:
 		for v_thresh in validity_threshold:
-			key = f"validity_threshold_{v_thresh:.1f}"
-			evaluator._validity_threshold = v_thresh
+			for m_thresh in membership_threshold:
+				key = f"v_{v_thresh:.1f}_m_{m_thresh:.1f}"
+				evaluator._validity_threshold = v_thresh
+				evaluator._membership_threshold = m_thresh
+				result = evaluator.evaluate()
+				results[key] = result
+				assoc_f1 = result["B2S"]["Association F1"]
+				mcs_f1 = result["B2S"]["MCS Association F1"]
+				if assoc_f1 > best_assoc_f1:
+					best_assoc_f1 = assoc_f1
+					best_combo = (m_thresh, v_thresh)
+					best_result = result
+				if mcs_f1 > best_mcs_assoc_f1:
+					best_mcs_assoc_f1 = mcs_f1
+					best_mcs_combo = (m_thresh, v_thresh)
+					best_mcs_result = result
+	else:
+		for m_thresh in membership_threshold:
+			key = f"membership_threshold_{m_thresh:.1f}"
+			evaluator._membership_threshold = m_thresh
 			results[key] = evaluator.evaluate()
 
 	serialized_results = _serialize_results(results)
 
+	logger.info(
+		f"Best Association F1: {best_assoc_f1:.1%} "
+		f"at Membership Threshold = {best_combo[0]:.1f}, "
+		f"Validity Threshold = {best_combo[1]:.1f}"
+	)
+	logger.info(
+		f"Best Multi-component Association F1: {best_mcs_assoc_f1:.1%} "
+		f"at Membership Threshold = {best_mcs_combo[0]:.1f}, "
+		f"Validity Threshold = {best_mcs_combo[1]:.1f}"
+	)
 	# Save results to JSON
 	with open(os.path.join(output_dir, "results.json"), "w") as f:
 		json.dump(serialized_results, f, indent=4)

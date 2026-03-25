@@ -67,6 +67,11 @@ class PhysicsFAN(nn.Module):
 
         features = self._preprocess_features(features)  # Pre-process the input features (B, P, C, num_physics_features)
 
+        # Replace the features vector with a vector full with 1s to see if the model actually uses them at all
+        # features = torch.ones_like(features, device=features.device)
+
+        spatial_features = self._extract_spatial_features(features)  # Extract spatial features (B, P, C, 2)
+
         # Add component id embeddings to the features to provide explicit component type information to the model.
         # _, _, C, _ = features.shape
         # component_ids = torch.arange(C, device=features.device)  # (C,)
@@ -78,8 +83,8 @@ class PhysicsFAN(nn.Module):
 
         embedded_features = self.embedding_norm(embedded_features)  # Apply layer normalization
 
-        unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
-        embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
+        # unsq_membership_matrix = membership_matrix.unsqueeze(-1).float()  # (B, P, C, 1)
+        # embedded_features *= unsq_membership_matrix  # Mask out features for components not in the proposal
 
         attended_features, attn_scores = self.transformer_block(
             embedded_features,
@@ -91,8 +96,23 @@ class PhysicsFAN(nn.Module):
         return {
             "attention_features": attended_features,
             "membership_matrix": membership_matrix,
-            "attention_scores": attn_scores
+            "attention_scores": attn_scores,
+            "spatial_features": spatial_features
         }
+    
+    def _extract_spatial_features(self, features):
+        """
+        Extract spatial features (dx, dy) from the input physics features.
+        This is a placeholder function and should be implemented based on the actual structure of the input features.
+        
+        :param features: A tensor of shape (B, P, C, num_physics_features) containing the physics features for each component.
+        :return: A tensor of shape (B, P, C, 2) containing the extracted spatial features (dx, dy) for each component.
+        """
+        # Placeholder implementation - replace with actual logic to extract spatial features from the input
+        dx = features[..., 6]  # Assuming the first feature is dx
+        dy = features[..., 7]  # Assuming the second feature is dy
+        spatial_features = torch.stack([dx, dy], dim=-1)  # (B, P, C, 2)
+        return spatial_features
 
     def _preprocess_features(self, features):
         """

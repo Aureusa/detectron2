@@ -33,7 +33,6 @@ class AttentionFusionModule(nn.Module):
         self.transformer_block = TransformerBlock(
             embed_dim=physics_fan_feature_dim, num_heads=num_heads, dropout=dropout
         )
-        self.pre_transformer_norm = nn.LayerNorm(physics_fan_feature_dim)
 
         if bidirectional:
             self.transformer_block_roi = TransformerBlock(
@@ -52,9 +51,14 @@ class AttentionFusionModule(nn.Module):
         self.bidirectional = bidirectional
 
     def forward(self, roi_features, physics_fan_features):
+        # Unpack packed features from PhysicsFAN
         physics_feats, membership = self._unpack_physics_fan_features(
             physics_fan_features
         )  # (B, P, C_comp, D), (B, P, C_comp)
+        physics_fan_spatial_feats = self._unpack_physics_fan_spatial_features(
+            physics_fan_features
+        )  # (B, P, C_comp, 2)
+
         bsz, proposals_per_image, num_components, feat_dim = physics_feats.shape
         expected_n = bsz * proposals_per_image
 
@@ -82,6 +86,16 @@ class AttentionFusionModule(nn.Module):
         pos = self._build_2d_sincos_position_embedding(
             h, w, feat_dim, device=roi_features.device
         )
+
+        # Add positional encoding to physics features as well,
+        # since they are queries in attention and need spatial info to attend effectively.
+        spatial_pos = self._build_component_position_encoding(
+            physics_fan_spatial_feats[..., 0],  # dx
+            physics_fan_spatial_feats[..., 1],  # dy
+            membership,  # (B, P, C)
+            h, w, feat_dim, device=physics_feats.device
+        )  # (B, P, C, D)
+        physics_feats = physics_feats + spatial_pos  # (B, P, C, D)
 
         # IMPORTANT: expand pos to match CLS
         cls_pos = torch.zeros(1, feat_dim, device=roi_features.device)  # (1, C)
@@ -111,22 +125,86 @@ class AttentionFusionModule(nn.Module):
                 proposals_per_image,
             )
 
-    def _unidirectional_fusion(self, physics_feats, roi_spatial, membership, expected_n, num_components, feat_dim, bsz, proposals_per_image):
+    def _build_component_position_encoding(
+            self,
+            scaled_dx,   # (B, P, C) — already scaled by proposal width, range [-0.5, 0.5]
+            scaled_dy,   # (B, P, C) — already scaled by proposal height, range [-0.5, 0.5]
+            membership,  # (B, P, C)
+            h, w,
+            feat_dim,
+            device
+        ):
+        bsz, proposals_per_image, num_components = scaled_dx.shape
+
+        # Turn into (B, P, C) -> (N, C) where N=B*P for easier processing
+        scaled_dx = scaled_dx.reshape(-1, scaled_dx.shape[2])  # (N, C)
+        scaled_dy = scaled_dy.reshape(-1, scaled_dy.shape[2])  # (N, C)
+
+        # Shift from [-0.5, 0.5] to [0, 1]
+        norm_x = (scaled_dx + 0.5).clamp(0.0, 1.0)  # (N, C)
+        norm_y = (scaled_dy + 0.5).clamp(0.0, 1.0)  # (N, C)
+
+        # Map to grid indices [0, W-1] and [0, H-1]
+        grid_x = norm_x * (w - 1)  # (N, C)
+        grid_y = norm_y * (h - 1)  # (N, C)
+
+        # Split the embedding budget across x/y so both coordinates are represented.
+        x_dim = feat_dim // 2
+        y_dim = feat_dim - x_dim
+
+        x_freqs = max(1, (x_dim + 1) // 2)
+        y_freqs = max(1, (y_dim + 1) // 2)
+
+        omega_x = torch.arange(x_freqs, device=device, dtype=grid_x.dtype) / x_freqs
+        omega_y = torch.arange(y_freqs, device=device, dtype=grid_y.dtype) / y_freqs
+        omega_x = 1.0 / (10000 ** omega_x)
+        omega_y = 1.0 / (10000 ** omega_y)
+
+        out_x = grid_x.reshape(-1, 1) * omega_x  # (N*C, x_freqs)
+        out_y = grid_y.reshape(-1, 1) * omega_y  # (N*C, y_freqs)
+
+        pos_x = torch.cat([torch.sin(out_x), torch.cos(out_x)], dim=1)[:, :x_dim]  # (N*C, x_dim)
+        pos_y = torch.cat([torch.sin(out_y), torch.cos(out_y)], dim=1)[:, :y_dim]  # (N*C, y_dim)
+
+        pos = torch.cat([pos_x, pos_y], dim=1)  # (N*C, feat_dim)
+        pos = pos.reshape(scaled_dx.shape[0], scaled_dx.shape[1], feat_dim)  # (N, C, feat_dim)
+
+        # Since we rescaled components outside the proposals will be at the center of
+        # the proposal [0.5, 0.5]. We mask those as they are NOT valid components.
+        mask = membership.reshape(-1, membership.shape[2])  # (N, C)
+        pos = pos * mask.unsqueeze(-1).float()  # Mask out invalid components (N, C, feat_dim)
+        return pos.reshape(bsz, proposals_per_image, num_components, feat_dim)  # (B, P, C, feat_dim)
+
+    def _unidirectional_fusion(
+            self,
+            physics_feats,
+            roi_spatial,
+            membership,
+            expected_n,
+            num_components,
+            feat_dim,
+            bsz,
+            proposals_per_image
+        ):
         # --- Cross-attention: component queries attend to spatial ROI keys ---
         # Q: (N, C_comp, D)  K=V: (N, 1 + H*W, D)
         query = physics_feats.reshape(expected_n, num_components, feat_dim)
         key = roi_spatial  # (N, 1 + H*W, D)
 
         physics_attends_to_roi, _ = self.transformer_block(
-            self.pre_transformer_norm(query), self.pre_transformer_norm(key), self.pre_transformer_norm(key)
+            query, key, key
             # No key_padding_mask needed: all spatial positions are valid.
         )  # (N, C_comp, D)
 
         fused = physics_attends_to_roi.reshape(bsz, proposals_per_image, num_components, feat_dim) # (B, P, C_comp, D)
-        fused = fused * membership.unsqueeze(-1).float()  # Mask out components not in the proposal
-        return fused, {
-            "physics_to_roi": physics_attends_to_roi,
-        }
+        # fused = fused * membership.unsqueeze(-1).float()  # Mask out components not in the proposal
+        return (
+            fused, # (B, P, C_comp, D)
+            {
+                "physics_to_roi": physics_attends_to_roi, # (N, C_comp, D)
+                "membership": membership # (B, P, C)
+            }
+        )
     
     def _bidirectional_fusion(
             self,
@@ -194,6 +272,10 @@ class AttentionFusionModule(nn.Module):
         membership_matrix = physics_fan_features["membership_matrix"]  # (B, P, C)
         return physics_attended_features, membership_matrix
     
+    def _unpack_physics_fan_spatial_features(self, physics_fan_features):
+        spatial_features = physics_fan_features["spatial_features"]  # (B, P, C, 2)
+        return spatial_features
+    
     def _build_2d_sincos_position_embedding(self, h, w, dim, device):
         """
         Build 2D sinusoidal positional embeddings.
@@ -208,19 +290,27 @@ class AttentionFusionModule(nn.Module):
 
         grid = torch.stack((grid_x, grid_y), dim=-1).float()  # (H, W, 2)
 
-        dim_half = dim // 2
-        omega = torch.arange(dim_half, device=device) / dim_half
-        omega = 1.0 / (10000 ** omega)
+        # Split the embedding budget across x/y so both coordinates are represented.
+        x_dim = dim // 2
+        y_dim = dim - x_dim
 
-        out_x = grid[..., 0].reshape(-1, 1) * omega
-        out_y = grid[..., 1].reshape(-1, 1) * omega
+        x_freqs = max(1, (x_dim + 1) // 2)
+        y_freqs = max(1, (y_dim + 1) // 2)
 
-        pos_x = torch.cat([torch.sin(out_x), torch.cos(out_x)], dim=1)
-        pos_y = torch.cat([torch.sin(out_y), torch.cos(out_y)], dim=1)
+        omega_x = torch.arange(x_freqs, device=device, dtype=grid.dtype) / x_freqs
+        omega_y = torch.arange(y_freqs, device=device, dtype=grid.dtype) / y_freqs
+        omega_x = 1.0 / (10000 ** omega_x)
+        omega_y = 1.0 / (10000 ** omega_y)
+
+        out_x = grid[..., 0].reshape(-1, 1) * omega_x
+        out_y = grid[..., 1].reshape(-1, 1) * omega_y
+
+        pos_x = torch.cat([torch.sin(out_x), torch.cos(out_x)], dim=1)[:, :x_dim]
+        pos_y = torch.cat([torch.sin(out_y), torch.cos(out_y)], dim=1)[:, :y_dim]
 
         pos = torch.cat([pos_x, pos_y], dim=1)
 
-        return pos[:, :dim]
+        return pos
 
 
 class ConcatenationFusionModule(nn.Module):

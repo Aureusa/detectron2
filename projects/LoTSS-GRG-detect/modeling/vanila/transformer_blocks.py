@@ -6,6 +6,12 @@ class TransformerBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.0):
         super().__init__()
 
+        # Pre attention layer norms for query, key, value
+        self.norm_q = nn.LayerNorm(embed_dim)
+        self.norm_k = nn.LayerNorm(embed_dim)
+        self.norm_v = nn.LayerNorm(embed_dim)
+
+        # Multi-head attention layer
         self.attention = nn.MultiheadAttention(
             embed_dim,
             num_heads,
@@ -13,9 +19,10 @@ class TransformerBlock(nn.Module):
             dropout=dropout,
         )
 
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        # Pre feedforward layer norm
+        self.norm = nn.LayerNorm(embed_dim)
 
+        # Feedforward network with 4x expansion and dropout
         self.ffn = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 4),
             nn.GELU(),
@@ -90,9 +97,9 @@ class TransformerBlock(nn.Module):
                 mask_to_apply = output_mask.unsqueeze(-1).float()
 
         # -------- Pre-norm Attention --------
-        q = self.norm1(query)
-        k = self.norm1(key)
-        v = self.norm1(value)
+        q = self.norm_q(query)
+        k = self.norm_k(key)
+        v = self.norm_v(value)
 
         attn_output, attn_score = self.attention(
             q, k, v, key_padding_mask=key_padding_mask
@@ -103,8 +110,7 @@ class TransformerBlock(nn.Module):
             x = x * mask_to_apply
 
         # -------- Pre-norm FeedForward --------
-        x = x + self.ffn(self.norm2(x))
-        x = self.norm2(x)
+        x = x + self.ffn(self.norm(x))
         if mask_to_apply is not None: # Masking
             x = x * mask_to_apply
 

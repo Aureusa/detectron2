@@ -32,7 +32,7 @@ from data.register_dataset import main as register_datasets
 from engine.grg_trainer import GRGTrainer
 from engine.b2s_trainer import B2STrainer
 
-from modeling.meta_arch import TailedRCNN
+from modeling.meta_arch import TailedRCNN, RaCAST
 
 
 logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")
