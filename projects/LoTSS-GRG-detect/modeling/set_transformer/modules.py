@@ -15,6 +15,14 @@ class rFF(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+        # Scale down FFN output projection  
+        nn.init.normal_(self.fc2.weight, std=0.02)
+        nn.init.zeros_(self.fc2.bias)
+
+        # Small init on output projection — standard transformer trick
+        with torch.no_grad():
+            self.fc2.weight.mul_(0.1)
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
@@ -35,8 +43,26 @@ class MAB(nn.Module):
         self.ln2 = nn.LayerNorm(embedding_dim)
         self.dropout2 = nn.Dropout(dropout)
 
+        # Scale down attention output projection
+        nn.init.normal_(self.multi_head.out_proj.weight, std=0.02)
+        nn.init.zeros_(self.multi_head.out_proj.bias)
+
     def forward(self, x, y, mask=None):
-        attention, _ = self.multi_head(query=self.ln1(x), key=self.ln1(y), value=self.ln1(y), key_padding_mask=mask) 
+        key_padding_mask = mask
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask.bool()
+            # Avoid all-masked rows, which can create NaNs in attention softmax.
+            all_masked = key_padding_mask.all(dim=1)
+            if all_masked.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_masked, 0] = False
+
+        attention, _ = self.multi_head(
+            query=self.ln1(x),
+            key=self.ln1(y),
+            value=self.ln1(y),
+            key_padding_mask=key_padding_mask,
+        )
         H = x + self.dropout1(attention)
         H = H + self.dropout2(self.rff(self.ln2(H)))
         return H
@@ -55,7 +81,7 @@ class ISAB(nn.Module):
     def __init__(self, embedding_dim, hidden_dim=None, num_heads=4, num_inds=32, dropout=0.0):
         super(ISAB, self).__init__()
         self.I = nn.Parameter(torch.Tensor(1, num_inds, embedding_dim))
-        nn.init.xavier_uniform_(self.I)
+        nn.init.normal_(self.I, mean=0.0, std=0.02)
         self.mab0 = MAB(embedding_dim, hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout)
         self.mab1 = MAB(embedding_dim, hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout)
 
@@ -72,7 +98,7 @@ class PMA(nn.Module):
     def __init__(self, embedding_dim, hidden_dim=None, num_heads=4, num_seeds=1, dropout=0.0):
         super(PMA, self).__init__()
         self.S = nn.Parameter(torch.Tensor(1, num_seeds, embedding_dim))
-        nn.init.xavier_uniform_(self.S)
+        nn.init.normal_(self.S, mean=0.0, std=0.02)
         self.mab = MAB(embedding_dim, hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout)
         self.rff = rFF(embedding_dim, hidden_dim=hidden_dim, dropout=dropout)
 
