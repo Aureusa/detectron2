@@ -1,0 +1,25 @@
+# Dataset configuration for GRG detection
+DATASET_NAME: "b2s"
+TYPE: "b2s_masked_rcnn"
+DATA_ROOT: "/home/s4861264/project_data/b2s_masked_rcnn_split/"
+
+TRAIN:
+  EXISTS: True
+  NAME: "train"
+  ANNOTATIONS: "annotations.json"
+  IMAGES: "images"
+  PROPOSALS: "proposals"
+
+VALIDATION:
+  EXISTS: True
+  NAME: "val"
+  ANNOTATIONS: "annotations.json"
+  IMAGES: "images"
+  PROPOSALS: "proposals"
+
+TEST:
+  EXISTS: True
+  NAME: "test"
+  ANNOTATIONS: "annotations.json"
+  IMAGES: "images"
+  PROPOSALS: "proposals"

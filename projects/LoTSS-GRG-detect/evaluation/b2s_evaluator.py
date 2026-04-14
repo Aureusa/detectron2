@@ -93,20 +93,50 @@ class B2SEvaluator(DatasetEvaluator):
             tp_validity,
             fp_validity,
             fn_validity,
+            tp_association,
+            fp_association,
+            fn_association,
+            tp_multicomponent_association,
+            fp_multicomponent_association,
+            fn_multicomponent_association,
             diagnostics,
-        ) = self._gather_predictions()
+        ) = self._evaluate_on_predictions()
 
 
-        # Metrics
+        # ---- Membership metrics ----
         membership_jaccard = self._jaccard(tp_membership, fp_membership, fn_membership)
         membership_precision = self._precision(tp_membership, fp_membership)
         membership_recall = self._recall(tp_membership, fn_membership)
         membership_f1 = self._f1(membership_precision, membership_recall)
 
+        # ---- Validity metrics ----
         validity_jaccard = self._jaccard(tp_validity, fp_validity, fn_validity)
         validity_precision = self._precision(tp_validity, fp_validity)
         validity_recall = self._recall(tp_validity, fn_validity)
         validity_f1 = self._f1(validity_precision, validity_recall)
+
+        # ---- Association metrics ----
+        association_jaccard = self._jaccard(tp_association, fp_association, fn_association)
+        association_precision = self._precision(tp_association, fp_association)
+        association_recall = self._recall(tp_association, fn_association)
+        association_f1 = self._f1(association_precision, association_recall)
+
+        # ---- Multi-component association metrics ----
+        mcs_association_jaccard = self._jaccard(
+            tp_multicomponent_association, 
+            fp_multicomponent_association, 
+            fn_multicomponent_association
+        )
+        mcs_association_precision = self._precision(
+            tp_multicomponent_association, 
+            fp_multicomponent_association
+        )
+        mcs_association_recall = self._recall(
+            tp_multicomponent_association, 
+            fn_multicomponent_association
+        )
+        mcs_association_f1 = self._f1(mcs_association_precision, mcs_association_recall)
+
 
         membership_results_str = [
             "Membership Jaccard",
@@ -120,7 +150,18 @@ class B2SEvaluator(DatasetEvaluator):
             "Validity Recall",
             "Validity F1",
         ]
-
+        association_results_str = [
+            "Association Jaccard",
+            "Association Precision",
+            "Association Recall",
+            "Association F1"
+        ]
+        mcs_association_results_str = [
+            "MCS Association Jaccard",
+            "MCS Association Precision",
+            "MCS Association Recall",
+            "MCS Association F1"
+        ]
         monitoring_metrics = [
             "Validity GT Positive Rate",
             "Validity Pred Positive Rate",
@@ -139,6 +180,14 @@ class B2SEvaluator(DatasetEvaluator):
             "Validity Precision": validity_precision,
             "Validity Recall": validity_recall,
             "Validity F1": validity_f1,
+            "Association Jaccard": association_jaccard,
+            "Association Precision": association_precision,
+            "Association Recall": association_recall,
+            "Association F1": association_f1,
+            "MCS Association Jaccard": mcs_association_jaccard,
+            "MCS Association Precision": mcs_association_precision,
+            "MCS Association Recall": mcs_association_recall,
+            "MCS Association F1": mcs_association_f1,
             "Validity GT Positive Rate": diagnostics["gt_validity_pos_rate"],
             "Validity Pred Positive Rate": diagnostics["pred_validity_pos_rate"],
             "Validity Logit Mean": diagnostics["validity_logit_mean"],
@@ -148,6 +197,8 @@ class B2SEvaluator(DatasetEvaluator):
 
         membership_results = {k: results[k] for k in membership_results_str}
         validity_results = {k: results[k] for k in validity_results_str}
+        association_results = {k: results[k] for k in association_results_str}
+        mcs_association_results = {k: results[k] for k in mcs_association_results_str}
         monitoring_metrics_results = {k: results[k] for k in monitoring_metrics}
         
         # Log the results in a nice table format
@@ -169,11 +220,25 @@ class B2SEvaluator(DatasetEvaluator):
             +
             create_small_table(monitoring_metrics_results)
         )
+        self._logger.info(
+            "B2S Evaluation Results for Component Association (range 0-1):"
+            +
+            "\n"
+            +
+            create_small_table(association_results)
+        )
+        self._logger.info(
+            "B2S Evaluation Results for Multi-component Association (range 0-1):"
+            +
+            "\n"
+            +
+            create_small_table(mcs_association_results)
+        )
         return copy.deepcopy({
             "B2S": results
         })
 
-    def _gather_predictions(self):
+    def _evaluate_on_predictions(self):
         tp_membership_list = []
         fp_membership_list = []
         fn_membership_list = []
@@ -184,6 +249,14 @@ class B2SEvaluator(DatasetEvaluator):
         pred_validity_binary_list = []
         pred_validity_probs_list = []
         pred_validity_logits_list = []
+
+        tp_association_list = []
+        fp_association_list = []
+        fn_association_list = []
+
+        tp_multicomponent_association_list = []
+        fp_multicomponent_association_list = []
+        fn_multicomponent_association_list = []
         
         for prediction in self._predictions:
             gt_proposal_validity = self._to_numpy(prediction["gt_proposal_validity"])  # (N,)
@@ -209,6 +282,37 @@ class B2SEvaluator(DatasetEvaluator):
             pred_validity_probs_list.append(np.asarray(pred_proposal_validity).reshape(-1))
             pred_validity_logits_list.append(np.asarray(pred_proposal_validity_logits).reshape(-1))
 
+            gt_valid = np.asarray(gt_proposal_validity).reshape(-1).astype(np.int32)
+            gt_member = np.asarray(gt_component_membership).astype(np.int32)
+            pred_valid = np.asarray(pred_proposal_validity_binary).reshape(-1).astype(np.int32)
+            pred_member = np.asarray(pred_component_membership_binary).astype(np.int32)
+    
+            tp_association, fp_association, fn_association = self._component_association_evaluation(
+                gt_valid=gt_valid,
+                gt_member=gt_member,
+                pred_valid=pred_valid,
+                pred_member=pred_member
+            )
+
+            (
+                tp_multicomponent_association,
+                fp_multicomponent_association,
+                fn_multicomponent_association
+            ) = self._multicomponent_association_evaluation(
+                gt_valid=gt_valid,
+                gt_member=gt_member,
+                pred_valid=pred_valid,
+                pred_member=pred_member
+            )
+
+            tp_association_list.append(tp_association)
+            fp_association_list.append(fp_association)
+            fn_association_list.append(fn_association)
+
+            tp_multicomponent_association_list.append(tp_multicomponent_association)
+            fp_multicomponent_association_list.append(fp_multicomponent_association)
+            fn_multicomponent_association_list.append(fn_multicomponent_association)
+
             tp_membership_list.append(self._tp(pred_component_membership_binary, gt_component_membership))
             fp_membership_list.append(self._fp(pred_component_membership_binary, gt_component_membership))
             fn_membership_list.append(self._fn(pred_component_membership_binary, gt_component_membership))
@@ -224,6 +328,14 @@ class B2SEvaluator(DatasetEvaluator):
         tp_validity_list = self._flatten_and_concat(tp_validity_list)
         fp_validity_list = self._flatten_and_concat(fp_validity_list)
         fn_validity_list = self._flatten_and_concat(fn_validity_list)
+
+        tp_association_list = self._flatten_and_concat(tp_association_list)
+        fp_association_list = self._flatten_and_concat(fp_association_list)
+        fn_association_list = self._flatten_and_concat(fn_association_list)
+
+        tp_multicomponent_association_list = self._flatten_and_concat(tp_multicomponent_association_list)
+        fp_multicomponent_association_list = self._flatten_and_concat(fp_multicomponent_association_list)
+        fn_multicomponent_association_list = self._flatten_and_concat(fn_multicomponent_association_list)
 
         gt_validity = self._flatten_and_concat(gt_validity_list)
         pred_validity_binary = self._flatten_and_concat(pred_validity_binary_list)
@@ -245,9 +357,115 @@ class B2SEvaluator(DatasetEvaluator):
             tp_validity_list,
             fp_validity_list,
             fn_validity_list,
+            tp_association_list,
+            fp_association_list,
+            fn_association_list,
+            tp_multicomponent_association_list,
+            fp_multicomponent_association_list,
+            fn_multicomponent_association_list,
             diagnostics,
         )
     
+    def _component_association_evaluation(self, gt_valid, gt_member, pred_valid, pred_member):
+        """
+        Evaluate component association performance on the subset
+        of proposals which are associated with a real source in GT or prediction.
+        A proposal is a true positive only if it is predicted valid and its full
+        component membership vector matches the GT vector exactly.
+
+        Wrong membership on a GT-valid proposal counts as both:
+        - FP: we predicted an incorrect association
+        - FN: we missed the correct association
+
+        This keeps proposal-level association recall from being artificially high
+        when validity is correct but membership is wrong.
+        """
+        if gt_member.ndim == 1:
+            gt_member = gt_member.reshape(-1, 1)
+        if pred_member.ndim == 1:
+            pred_member = pred_member.reshape(-1, 1)
+
+        if gt_valid.shape[0] != pred_valid.shape[0]:
+            raise ValueError(
+                f"Validity length mismatch: gt={gt_valid.shape[0]}, pred={pred_valid.shape[0]}"
+            )
+        if gt_member.shape != pred_member.shape:
+            raise ValueError(
+                "Membership shape mismatch for per-proposal evaluation. "
+                f"gt_member={gt_member.shape}, pred_member={pred_member.shape}"
+            )
+        if gt_member.shape[0] != gt_valid.shape[0]:
+            raise ValueError(
+                "Membership and validity lengths must match for per-proposal evaluation. "
+                f"membership={gt_member.shape[0]}, validity={gt_valid.shape[0]}"
+            )
+
+        gt_positive = gt_valid == 1
+        pred_positive = pred_valid == 1
+        membership_correct = np.all(pred_member == gt_member, axis=1)
+
+        tp = np.logical_and.reduce((
+            gt_positive,
+            pred_positive,
+            membership_correct,
+        )).astype(np.int32)
+
+        fp = np.logical_and(
+            pred_positive,
+            np.logical_or(
+                np.logical_not(gt_positive),
+                np.logical_not(membership_correct),
+            ),
+        ).astype(np.int32)
+
+        fn = np.logical_and(
+            gt_positive,
+            np.logical_or(
+                np.logical_not(pred_positive),
+                np.logical_not(membership_correct),
+            ),
+        ).astype(np.int32)
+
+        return tp, fp, fn
+
+    def _multicomponent_association_evaluation(self, gt_valid, gt_member, pred_valid, pred_member):
+        """
+        Evaluate component association performance on proposals with multiple components
+        """
+        # We need to look at each proposal and check if the gt members are more
+        # than one, and if so, check if the predicted members match the gt members.
+        gt_valid = np.asarray(gt_valid).reshape(-1).astype(np.int32)
+        pred_valid = np.asarray(pred_valid).reshape(-1).astype(np.int32)
+        gt_member = np.asarray(gt_member).astype(np.int32)
+        pred_member = np.asarray(pred_member).astype(np.int32)
+
+        gt_multicomponent = np.logical_and(
+            gt_valid == 1, 
+            np.sum(gt_member, axis=1) > 1
+        )
+        pred_multicomponent = np.logical_and(
+            pred_valid == 1, 
+            np.sum(pred_member, axis=1) > 1
+        )
+
+        # Include proposals flagged as MCS by either side
+        mcs_mask = np.logical_or(gt_multicomponent, pred_multicomponent)
+        
+        # Masked out all predictions and GT that are not multi-component
+        gt_multicomponent_member = gt_member[mcs_mask]
+        pred_multicomponent_member = pred_member[mcs_mask]
+        gt_multicomponent_valid = gt_valid[mcs_mask]
+        pred_multicomponent_valid = pred_valid[mcs_mask]
+
+        # Now we can convert them back to the same format as the single-component
+        # evaluation by treating each unique combination of components as a separate class.
+        return self._component_association_evaluation(
+            gt_valid=gt_multicomponent_valid,
+            gt_member=gt_multicomponent_member,
+            pred_valid=pred_multicomponent_valid,
+            pred_member=pred_multicomponent_member
+        )
+
     def _jaccard(self, tp: np.ndarray, fp: np.ndarray, fn: np.ndarray):
         """Calculate accuracy from TP, FP, FN"""
         total = np.sum(tp) + np.sum(fp) + np.sum(fn)
@@ -367,7 +585,7 @@ class B2SMultiClassEvaluator(B2SEvaluator):
             per_class_fp,
             per_class_fn,
             diagnostics,
-        ) = self._gather_predictions()
+        ) = self._evaluate_on_predictions()
 
         # ---- Membership (identical to parent) -------------------------
         membership_jaccard   = self._jaccard(tp_membership, fp_membership, fn_membership)
@@ -475,7 +693,7 @@ class B2SMultiClassEvaluator(B2SEvaluator):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _gather_predictions(self):
+    def _evaluate_on_predictions(self):
         tp_membership_list = []
         fp_membership_list = []
         fn_membership_list = []

@@ -35,6 +35,10 @@ class rFF(nn.Module):
 class MAB(nn.Module):
     def __init__(self, embedding_dim, hidden_dim=None, num_heads=4, dropout=0.0):
         super(MAB, self).__init__()
+        if embedding_dim % num_heads != 0:
+            raise AssertionError(
+                f"Embedding dimension {embedding_dim} must be divisible by number of heads {num_heads}."
+                f" Got embedding_dim={embedding_dim} and num_heads={num_heads}")
         self.multi_head = nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=num_heads, batch_first=True)
         self.ln1 = nn.LayerNorm(embedding_dim)
         self.dropout1 = nn.Dropout(dropout)

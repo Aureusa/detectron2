@@ -6,8 +6,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT/pipelines"
 
 # Default config
-CONFIG="${PROJECT_ROOT}/configs/model_configs/modified_rcnn.yaml"
-DATASET_CONFIG="${PROJECT_ROOT}/configs/dataset_configs/dataset_b2s.yaml"
+CONFIG="${PROJECT_ROOT}/configs/model_configs/mask_rcnn_R_50_FPN_b2s_rgz_v2.yaml"
+DATASET_CONFIG="${PROJECT_ROOT}/configs/dataset_configs/dataset_b2s_rgz_masked_rcnn.yaml"
 
 # Parse arguments
 NUM_GPUS=1

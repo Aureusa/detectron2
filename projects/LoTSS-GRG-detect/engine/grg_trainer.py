@@ -19,7 +19,9 @@ from detectron2.data.samplers import InferenceSampler
 
 # Import custom modules from parent directory
 from data.dataset_mapper import GRGDatasetMapper as NPZProposalDatasetMapper
-from evaluation.grg_evaluator import GRGEvaluator
+from evaluation.grg_evaluator import GRGEvaluator, B2SMaskedRCNNEvaluator
+\
+from engine.backbone_freeze_hook import BackboneFreezeHook
 
 logger = logging.getLogger("LoTSS-GRG-detect.train")
 
@@ -40,17 +42,30 @@ class GRGTrainer(DefaultTrainer):
         metadata = MetadataCatalog.get(dataset_name)
         annotations_path = metadata.json_file
 
+        if cfg.TEST.EVALUATOR == "B2SMaskedRCNNEvaluator":
+            evaluator = B2SMaskedRCNNEvaluator(
+                coco_images=DatasetCatalog.get(dataset_name),
+                annotations_path=annotations_path,
+                score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
+            )
+        elif cfg.TEST.EVALUATOR == "GRGEvaluator":
+            evaluator = GRGEvaluator(
+                coco_images=DatasetCatalog.get(dataset_name),
+                annotations_path=annotations_path,
+                score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
+            )
+        else:
+            raise ValueError(
+                f"Unsupported evaluator type: {cfg.TEST.EVALUATOR}."
+                f" Must be 'B2SMaskedRCNNEvaluator' or 'GRGEvaluator'. Check your config file.")
+
         return DatasetEvaluators([
             COCOEvaluator(
                 dataset_name,
                 output_dir=output_folder,
                 tasks=("bbox", "segm")
             ),
-            GRGEvaluator(
-                coco_images=DatasetCatalog.get(dataset_name),
-                annotations_path=annotations_path,
-                score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
-            )
+            evaluator
         ])
     
     @classmethod
@@ -95,4 +110,12 @@ class GRGTrainer(DefaultTrainer):
             sampler=InferenceSampler(len(dataset_dicts)),
             num_workers=cfg.DATALOADER.NUM_WORKERS,
         )
+
+    def build_hooks(self):
+        hooks = super().build_hooks()
+        freeze_until_iter = int(self.cfg.SOLVER.BACKBONE_FREEZE_ITERS)
+        if freeze_until_iter > 0:
+            hooks.insert(0, BackboneFreezeHook(freeze_until_iter=freeze_until_iter))
+        return hooks
+
     

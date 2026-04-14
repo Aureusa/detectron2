@@ -45,7 +45,8 @@ def build_set_transformer(cfg, input_dim):
     return SetTransformer(
         dim_input=input_dim,
         num_seeds=1,
-        dropout=0.1
+        dropout=0.1,
+        num_heads=7
     )
     # return SetTransformer(
     #     dim_input=cfg.MODEL.SET_TRANSFORMER.DIM_INPUT,

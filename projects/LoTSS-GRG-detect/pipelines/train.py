@@ -33,6 +33,7 @@ from engine.grg_trainer import GRGTrainer
 from engine.b2s_trainer import B2STrainer
 
 from modeling.meta_arch import TailedRCNN, RaCAST
+from modeling.roi_heads.mask_head import WeightedMaskRCNNConvUpsampleHead
 
 
 logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")

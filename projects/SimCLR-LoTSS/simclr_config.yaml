@@ -1,0 +1,38 @@
+_BASE_: "../../configs/Base-RCNN-FPN.yaml"
+
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  RESNETS:
+    DEPTH: 50
+  # Disable detection-specific heads — we only want the backbone
+  PROPOSAL_GENERATOR:
+    NAME: "PrecomputedProposals"
+  ROI_HEADS:
+    NAME: "StandardROIHeads"
+    NUM_CLASSES: 1
+
+DATASETS:
+  TRAIN: ("b2s_train",)
+  TEST: ()  # no eval during SSL pretraining
+
+DATALOADER:
+  NUM_WORKERS: 8
+
+# ── SimCLR-specific config ────────────────────────────────────────────────────
+SIMCLR:
+  PROJECTION_DIM: 128
+  TEMPERATURE: 0.5
+  NUM_EPOCHS: 200
+  WARMUP_EPOCHS: 10
+  BATCH_SIZE: 256
+  BASE_LR: 3e-4
+  WEIGHT_DECAY: 1e-4
+  CHECKPOINT_PERIOD: 50       # save every N epochs
+  AUG:
+    CROP_SCALE_MIN: 0.2
+    CROP_SCALE_MAX: 1.0
+    COLOR_JITTER_PROB: 0.8
+    GRAYSCALE_PROB: 0.2
+    BLUR_PROB: 0.5
+
+OUTPUT_DIR: "/home/s4861264/detectron2/projects/SimCLR-LoTSS/output/simclr_pretrain_v1"

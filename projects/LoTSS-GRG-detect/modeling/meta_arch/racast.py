@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from detectron2.config import configurable
@@ -13,7 +14,7 @@ from detectron2.modeling.backbone import Backbone, build_backbone
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
 
 from ..set_transformer import build_set_transformer
-from ..tail import build_physics_fan, build_fusion_module
+from ..tail import build_physics_fn, build_fusion_module
 from ..roi_heads import build_roi_align, build_set_heads
 
 
@@ -24,7 +25,7 @@ class RaCAST(nn.Module):
         self,
         *,
         backbone: Backbone,
-        physics_fan: nn.Module,
+        physics_fn: nn.Module,
         fusion_module: nn.Module,
         roi_align: nn.Module,
         set_transformer: nn.Module,
@@ -37,8 +38,8 @@ class RaCAST(nn.Module):
         """
         Args:
             backbone: a backbone module, must follow detectron2's backbone interface
-            physics_fan: a PhysicsFAN module that provides additional features
-            fusion_module: a fusion module that combines ROI features and PhysicsFAN features
+            physics_fn: a PhysicsFN module that provides additional features
+            fusion_module: a fusion module that combines ROI features and PhysicsFN features
             roi_align: a ROI Align module that performs ROI pooling
             heads: a ROI head that performs per-region computation and prediction
             pixel_mean, pixel_std: list or tuple with #channels element, representing
@@ -62,8 +63,8 @@ class RaCAST(nn.Module):
             self.pixel_mean.shape == self.pixel_std.shape
         ), f"{self.pixel_mean} and {self.pixel_std} have different shapes!"
 
-        self.physics_fan = physics_fan
-        self.fusion_module = fusion_module
+        # self.physics_fn = physics_fn
+        # self.fusion_module = fusion_module
         self.roi_align = roi_align
         self.set_transformer = set_transformer
         self.heads = heads
@@ -82,23 +83,23 @@ class RaCAST(nn.Module):
             physics_fan_feature_dim=physics_fan_feature_dim,
         )
 
-        physics_fan = build_physics_fan(cfg)
+        physics_fn = build_physics_fn(cfg)
 
         roi_align = build_roi_align(cfg, output_shapes)
 
-        set_transformer = build_set_transformer(cfg, input_dim=physics_fan_feature_dim)
+        set_transformer = build_set_transformer(cfg, input_dim=physics_fan_feature_dim + 10)
 
         # The input dimension for the physics heads is determined by the fusion module's output size
         heads = build_set_heads(
             cfg,
-            proposal_input_dim=physics_fan_feature_dim,
-            membership_input_dim=physics_fan_feature_dim
+            proposal_input_dim=physics_fan_feature_dim + 10,
+            membership_input_dim=physics_fan_feature_dim + 10
         )
 
         return {
             "backbone": backbone,
             "fusion_module": fusion_module,
-            "physics_fan": physics_fan,
+            "physics_fn": physics_fn,
             "roi_align": roi_align,
             "set_transformer": set_transformer,
             "heads": heads,
@@ -173,45 +174,54 @@ class RaCAST(nn.Module):
                 The :class:`Instances` object has the following keys:
                 "pred_boxes", "pred_classes", "scores", "pred_masks", "pred_keypoints"
         """
-        if not self.training:
+        if not self.training: # Do inference
             return self.inference(batched_inputs)
 
+        # preprocess the input images and get ground truth
         images = self.preprocess_image(batched_inputs)
         if "target" in batched_inputs[0]:
             gt_targets = [x["target"].to(self.device) for x in batched_inputs]
         else:
             gt_targets = None
 
-        # Extract features using the backbone
-        features = self.backbone(images.tensor)
-
         # We assume that proposals are provided in the input for training.
         assert "proposals" in batched_inputs[0]
         proposals = [x["proposals"].to(self.device) for x in batched_inputs]
 
-        # Backbone features -> ROI features
+        # ---- Extract features using the backbone ----
+        features = self.backbone(images.tensor)
+
+        # ---- Backbone features -> ROIAling -> features ----
         roi_features = self.roi_align(features, proposals)
 
+        # ---- Extract the locations (dx, dy) of each component in each proposal and pool from ROI features ----
         if "physics_features" in batched_inputs[0]:
             phys_features = [x["physics_features"].to(self.device) for x in batched_inputs]
         else:
             raise NotImplementedError("Physics features are expected in the input for training. Please ensure that the dataset mapper is providing them.")
-        fan_features = self.physics_fan(phys_features)
+        (
+            dx, # (B, P, C) in [-0.5, 0.5]
+            dy, # (B, P, C) in [-0.5, 0.5]
+            physics_feats, # (B, P, C, num_physics_features)
+            component_mask # (B, P, C) bool tensor indicating valid components
+        ) = self._extract_spatial_features(phys_features)
+        physics_feats = physics_feats.view(
+            -1, physics_feats.shape[-2], physics_feats.shape[-1]
+        ) # (B, P, C, num_physics_features) -> (N, C, num_physics_features)
 
-        # Fuse ROI features and PhysicsFAN features before feeding into the heads
-        fused_features, fusion_drop = self.fusion_module(roi_features, fan_features)
-        fused_features = fused_features.view(
-            -1, fused_features.shape[-2], fused_features.shape[-1]
-        ) # (B, P, C_comp, D) -> (N, C_comp, D)
-        membership = fusion_drop["membership"] # (B, P, C)
-        membership = membership.view(-1, membership.shape[-1]) # (B*P, C)
-        mask = ~membership.bool() # (N, C)
+        component_roi_features = self._extract_component_roi_features(
+            roi_features, dx, dy, component_mask
+        ) # (N, C, D)
+        set_input = torch.cat([component_roi_features, physics_feats], dim=-1) # (N, C, D + num_physics_features)
 
+        # ---- Set Transformer ----
+        key_padding_mask = ~component_mask.bool().view(-1, component_mask.shape[-1]) # (N, C)
         (
             enc_feats, # (N, C_comp, D)
             dec_feats  # (N, 1, D)
-        ) = self.set_transformer(fused_features, mask=mask) # (N, C_comp, D)
+        ) = self.set_transformer(set_input, mask=key_padding_mask) # (N, C_comp, D)
 
+        # ---- Set Transformer features -> Set Heads -> losses ----
         _, detector_losses = self.heads(enc_feats, dec_feats, proposals, gt_targets)
         if self.vis_period > 0:
             storage = get_event_storage()
@@ -221,6 +231,75 @@ class RaCAST(nn.Module):
         losses = {}
         losses.update(detector_losses)
         return losses
+    
+    def _extract_spatial_features(self, features):
+        """
+        Extract spatial features (dx, dy) from the input physics features.
+        This is a placeholder function and should be implemented based on the actual structure of the input features.
+        
+        :param features: A tensor of shape (B, P, C, num_physics_features) containing the physics features for each component.
+        :return: A tensor of shape (B, P, C, 2) containing the extracted spatial features (dx, dy) for each component.
+        """
+        # features contains list of Instances with a field component_features of shape
+        # (P, C, num_physics_features)
+        # We are batching the features, so we need to stack them into a tensor of shape
+        # (B, P, C, num_physics_features)
+        # The features are already tensors on the right device
+        component_features = torch.stack([feat.component_features for feat in features], dim=0)  # (B, P, C, num_physics_features)
+        component_mask = torch.stack([feat.component_mask for feat in features], dim=0)  # (B, P, C)
+
+        # Currently we are assuming that the spatial features (dx, dy)
+        # are located at specific indices in the physics features.
+        dx = component_features[..., 6]  # Assuming the first feature is dx - (B, P, C)
+        dy = component_features[..., 7]  # Assuming the second feature is dy - (B, P, C)
+        return dx, dy, component_features, component_mask
+    
+    def _extract_component_roi_features(
+            self,
+            roi_features,   # (N, D, H, W)
+            dx,         # (N, C) in [0, W-1]
+            dy,         # (N, C) in [0, H-1]
+            component_mask, # (B, P, C)
+        ):
+        N, D, H, W = roi_features.shape
+
+        # Turn into (B, P, C) -> (N, C) where N=B*P for easier processing
+        scaled_dx = dx.reshape(-1, dx.shape[2])  # (N, C)
+        scaled_dy = dy.reshape(-1, dy.shape[2])  # (N, C)
+
+        # Shift from [-0.5, 0.5] to [0, 1]
+        norm_x = (scaled_dx + 0.5).clamp(0.0, 1.0)  # (N, C)
+        norm_y = (scaled_dy + 0.5).clamp(0.0, 1.0)  # (N, C)
+
+        # Map to grid indices [0, W-1] and [0, H-1]
+        grid_x = norm_x * (W - 1)  # (N, C)
+        grid_y = norm_y * (H - 1)  # (N, C)
+        
+        # F.grid_sample expects coordinates in [-1, 1]
+        # Normalise from [0, W-1] and [0, H-1] to [-1, 1]
+        norm_x = (grid_x / (W - 1)) * 2 - 1  # (N, C)
+        norm_y = (grid_y / (H - 1)) * 2 - 1  # (N, C)
+        
+        # grid_sample expects (N, H_out, W_out, 2)
+        # We want C output points, shaped as (N, C, 1, 2)
+        sample_grid = torch.stack([norm_x, norm_y], dim=-1)  # (N, C, 2)
+        sample_grid = sample_grid.unsqueeze(2)               # (N, C, 1, 2)
+        
+        # Sample from ROI features at component locations
+        # Output: (N, D, C, 1)
+        sampled = F.grid_sample(
+            roi_features,
+            sample_grid,
+            mode='bilinear',    # bilinear interpolation — smooth gradients
+            padding_mode='zeros',
+            align_corners=True
+        )  # (N, D, C, 1)
+        
+        component_visual = sampled.squeeze(-1).permute(0, 2, 1)  # (N, C, D)
+        
+        # Zero out padding components
+        component_visual = component_visual * component_mask.reshape(-1, component_mask.shape[2]).unsqueeze(-1).float()
+        return component_visual  # (N, C, D)
 
     def inference(
         self,
@@ -251,30 +330,42 @@ class RaCAST(nn.Module):
         features = self.backbone(images.tensor)
 
         if detected_instances is None:
+            # We assume that proposals are provided in the input for training.
             assert "proposals" in batched_inputs[0]
             proposals = [x["proposals"].to(self.device) for x in batched_inputs]
 
+            # ---- Backbone features -> ROIAling -> features ----
             roi_features = self.roi_align(features, proposals)
 
+            # ---- Extract the locations (dx, dy) of each component in each proposal and pool from ROI features ----
             if "physics_features" in batched_inputs[0]:
                 phys_features = [x["physics_features"].to(self.device) for x in batched_inputs]
             else:
                 raise NotImplementedError("Physics features are expected in the input for training. Please ensure that the dataset mapper is providing them.")
-            fan_features = self.physics_fan(phys_features)
-            
-            fused_features, fusion_drop = self.fusion_module(roi_features, fan_features)
-            fused_features = fused_features.view(
-                -1, fused_features.shape[-2], fused_features.shape[-1]
-            ) # (B, P, C_comp, D) -> (N, C_comp, D)
-            membership = fusion_drop["membership"] # (B, P, C)
-            membership = membership.view(-1, membership.shape[-1]) # (B*P, C)
-            mask = ~membership.bool() # (N, C)
+            (
+                dx, # (B, P, C) in [-0.5, 0.5]
+                dy, # (B, P, C) in [-0.5, 0.5]
+                physics_feats, # (B, P, C, num_physics_features)
+                component_mask # (B, P, C) bool tensor indicating valid components
+            ) = self._extract_spatial_features(phys_features)
+            physics_feats = physics_feats.view(
+                -1, physics_feats.shape[-2], physics_feats.shape[-1]
+            ) # (B, P, C, num_physics_features) -> (N, C, num_physics_features)
 
+            component_roi_features = self._extract_component_roi_features(
+                roi_features, dx, dy, component_mask
+            ) # (N, C, D)
+            set_input = torch.cat([component_roi_features, physics_feats], dim=-1) # (N, C, D + num_physics_features)
+
+            # ---- Set Transformer ----
+            key_padding_mask = ~component_mask.bool().view(-1, component_mask.shape[-1]) # (N, C)
             (
                 enc_feats, # (N, C_comp, D)
                 dec_feats  # (N, 1, D)
-            ) = self.set_transformer(fused_features, mask=mask) # (N, C_comp, D)
-            results, _ = self.heads(enc_feats, dec_feats, proposals, None)
+            ) = self.set_transformer(set_input, mask=key_padding_mask) # (N, C_comp, D)
+
+            # ---- Set Transformer features -> Set Heads -> losses ----
+            results, _ = self.heads(enc_feats, dec_feats, proposals)
         else:
             results = [x.to(self.device) for x in detected_instances]
 
