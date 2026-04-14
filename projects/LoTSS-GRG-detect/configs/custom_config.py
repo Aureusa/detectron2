@@ -59,4 +59,9 @@ def add_lotss_grg_config(cfg):
     cfg.DATASETS.POSITIVE_FRACTION = 0.20  # Fraction of positive samples in each batch pos:neg - 1:5
     cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TRAIN = 100000
     cfg.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST = 100000
-    
+
+    # Box Head
+    cfg.MODEL.ROI_BOX_HEAD.MCS_CLS_WEIGHT = 1.0
+
+    # Mask Head
+    cfg.MODEL.ROI_MASK_HEAD.MCS_MASK_WEIGHT = 1.0

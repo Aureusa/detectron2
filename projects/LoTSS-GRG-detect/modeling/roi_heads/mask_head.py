@@ -13,7 +13,6 @@ from detectron2.layers import Conv2d, ConvTranspose2d, ShapeSpec, cat, get_norm
 
 from detectron2.modeling.roi_heads.mask_head import (
     BaseMaskRCNNHead,
-    MaskRCNNConvUpsampleHead,
     mask_rcnn_inference,
     ROI_MASK_HEAD_REGISTRY
 )
@@ -121,8 +120,7 @@ def weighted_mask_rcnn_loss(pred_mask_logits: torch.Tensor, instances: List[Inst
     return loss
 
 
-# TODO: Add mcs_weight to the config.
-class WeightedBaseMaskRCNNHead(BaseMaskRCNNHead):
+class WeightedMaskRCNNHead(BaseMaskRCNNHead):
     """
     Implement the basic Mask R-CNN losses and inference logic described in :paper:`Mask R-CNN`
     """
@@ -142,6 +140,10 @@ class WeightedBaseMaskRCNNHead(BaseMaskRCNNHead):
             vis_period=vis_period,
         )
         self.mcs_weight = mcs_weight
+    
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        return {"vis_period": cfg.VIS_PERIOD, "mcs_weight": cfg.MODEL.ROI_MASK_HEAD.MCS_MASK_WEIGHT}
 
     def forward(self, x, instances: List[Instances]):
         """
@@ -175,7 +177,7 @@ class WeightedBaseMaskRCNNHead(BaseMaskRCNNHead):
 # Therefore, to add new layers in this head class, please make sure they are
 # added in the order they will be used in forward().
 @ROI_MASK_HEAD_REGISTRY.register()
-class WeightedMaskRCNNConvUpsampleHead(WeightedBaseMaskRCNNHead, nn.Sequential):
+class WeightedMaskRCNNConvUpsampleHead(WeightedMaskRCNNHead, nn.Sequential):
     """
     A mask head with several conv layers, plus an upsample layer (with `ConvTranspose2d`).
     Predictions are made with a final 1x1 conv layer.

@@ -1,2 +1,5 @@
-from .roi_align import build_roi_align, ROIALign
-from .heads import build_physics_heads, build_set_heads, PhysicsAwareHeads
+from .fast_rcnn import WeightedFastRCNNOutputLayers
+from .mask_head import WeightedMaskRCNNConvUpsampleHead
+from .roi_heads import B2SROIHeads
+
+__all__ = ["B2SROIHeads", "WeightedFastRCNNOutputLayers", "WeightedMaskRCNNConvUpsampleHead"]

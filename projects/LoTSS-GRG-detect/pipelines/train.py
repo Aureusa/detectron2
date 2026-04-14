@@ -32,8 +32,7 @@ from data.register_dataset import main as register_datasets
 from engine.grg_trainer import GRGTrainer
 from engine.b2s_trainer import B2STrainer
 
-from modeling.meta_arch import TailedRCNN, RaCAST
-from modeling.roi_heads.mask_head import WeightedMaskRCNNConvUpsampleHead
+from modeling.roi_heads import *  # Ensure custom ROI heads are registered
 
 
 logger = setup_logger(name="LoTSS-GRG-detect.train", termcolor="magenta")
