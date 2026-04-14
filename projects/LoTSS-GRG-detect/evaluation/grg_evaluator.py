@@ -13,7 +13,7 @@ sys.path.insert(0, str(project_root))
 
 
 from detectron2.evaluation import DatasetEvaluator
-from detectron2.utils.logger import create_small_table, setup_logger
+from detectron2.utils.logger import create_small_table
 
 import numpy as np
 import torch
@@ -42,7 +42,8 @@ class GRGEvaluator(DatasetEvaluator, COCOProbe):
         self.coco_images = coco_images
         self._cpu_device = torch.device("cpu")
         self._score_threshold = score_threshold
-        self._logger = setup_logger(name="LoTSS-GRG-detect.evaluation.GRGEvaluator", termcolor="magenta")
+        # Use detectron2 logger namespace so default_setup file handlers write these messages to OUTPUT_DIR/log.txt.
+        self._logger = logging.getLogger("detectron2.projects.lotss_grg.evaluation")
 
     def reset(self):
         """
