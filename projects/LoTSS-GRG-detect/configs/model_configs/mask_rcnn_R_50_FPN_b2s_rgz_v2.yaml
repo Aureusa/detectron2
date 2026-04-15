@@ -35,8 +35,8 @@ TRAINER:
 SOLVER:
   IMS_PER_BATCH: 16  # Adjust based on your GPU memory
   BASE_LR: 0.001
-  STEPS: (320000, 420000)  # Adjust based on your dataset size and desired schedule
-  MAX_ITER: 480000
+  STEPS: (690000, 920000) # 60% and 80% of the total iterations # Adjust based on your dataset size and desired schedule
+  MAX_ITER: 1150000
   CHECKPOINT_PERIOD: 20000
   WARMUP_ITERS: 1000
 INPUT:
