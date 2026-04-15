@@ -6,12 +6,16 @@ MODEL:
   RESNETS:
     DEPTH: 50
   ROI_HEADS:
+    NAME: "B2SROIHeads"
     BATCH_SIZE_PER_IMAGE: 256
     NUM_CLASSES: 2  # MCS and SCS classes
     SCORE_THRESH_TEST: 0.5  # Adjust based on validation performance
   ROI_MASK_HEAD:
     NAME: "WeightedMaskRCNNConvUpsampleHead"
     POOLER_RESOLUTION: 28  # Increase mask resolution from default 14
+    MCS_MASK_WEIGHT: 3.0  # Give more weight to MCS class in the mask head loss
+  ROI_BOX_HEAD:
+    MCS_CLS_WEIGHT: 3.0  # Give more weight to MCS class in the class head loss
   # We load precomputed proposals in custom mapper (from NPZ files)
   # So LOAD_PROPOSALS should be False (it expects pickle files)
   LOAD_PROPOSALS: False
