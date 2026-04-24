@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from .probe import COCOProbe
+from engine.cat_constructor import CatalogueConstructor
 
 
 class GRGEvaluator(DatasetEvaluator, COCOProbe):
@@ -877,4 +878,235 @@ class B2SMaskedRCNNEvaluator(GRGEvaluator):
                 if (x, y) not in positions_set and (x1 <= x <= x2 and y1 <= y <= y2):
                     return False
         return True
+
+
+class ComponentAssociationEvaluator(GRGEvaluator):
+    """
+    Evaluator for component association-based evaluation.
+    This approach focuses on whether the predicted region (mask or bbox) correctly associates the GRG components together,
+    without necessarily requiring all components to be perfectly covered.
+    """
+    def __init__(
+        self,
+        coco_images: list[dict],
+        annotations_path: str,
+        score_threshold: float = 0.5,
+    ):
+        super().__init__(coco_images, annotations_path, score_threshold)
+        self._catalogue_constructor = CatalogueConstructor()
+
+    def process(self, inputs, outputs):
+        """
+        Cache predictions so evaluate() can be called repeatedly with different thresholds
+        without re-running model inference.
+        """
+        for input_data, output in zip(inputs, outputs):
+            prediction = {
+                "image_id": input_data["image_id"],
+                "instances": output["instances"].to(self._cpu_device) if "instances" in output else None,
+            }
+            self._predictions.append(prediction)
+
+    def set_score_threshold(self, threshold: float):
+        """Set score threshold for filtering predictions."""
+        self._score_threshold = threshold
+
+    def evaluate(self):
+        if len(self._predictions) == 0:
+            self._logger.warning("[ComponentAssociationEvaluator] Did not receive valid predictions.")
+            return {}
+
+        overall, classwise = self._gather_predictions_with_classwise_counts()
+
+        results = {
+            **self._metrics_from_counts(overall["mask_source"], prefix="segm"),
+            **self._metrics_from_counts(overall["bbox_source"], prefix="bbox"),
+            **self._metrics_from_counts(overall["mask_component"], prefix="segm_component"),
+            **self._metrics_from_counts(overall["bbox_component"], prefix="bbox_component"),
+            "mask_tp": overall["mask_source"]["tp"],
+            "mask_fp": overall["mask_source"]["fp"],
+            "mask_fn": overall["mask_source"]["fn"],
+            "bbox_tp": overall["bbox_source"]["tp"],
+            "bbox_fp": overall["bbox_source"]["fp"],
+            "bbox_fn": overall["bbox_source"]["fn"],
+            "mask_component_tp": overall["mask_component"]["tp"],
+            "mask_component_fp": overall["mask_component"]["fp"],
+            "mask_component_fn": overall["mask_component"]["fn"],
+            "bbox_component_tp": overall["bbox_component"]["tp"],
+            "bbox_component_fp": overall["bbox_component"]["fp"],
+            "bbox_component_fn": overall["bbox_component"]["fn"],
+        }
+
+        class_results = {}
+        for class_name, counts in sorted(classwise.items(), key=lambda item: item[0]):
+            class_results[class_name] = {
+                **self._metrics_from_counts(counts["mask_source"], prefix="segm"),
+                **self._metrics_from_counts(counts["bbox_source"], prefix="bbox"),
+                **self._metrics_from_counts(counts["mask_component"], prefix="segm_component"),
+                **self._metrics_from_counts(counts["bbox_component"], prefix="bbox_component"),
+                "mask_tp": counts["mask_source"]["tp"],
+                "mask_fp": counts["mask_source"]["fp"],
+                "mask_fn": counts["mask_source"]["fn"],
+                "bbox_tp": counts["bbox_source"]["tp"],
+                "bbox_fp": counts["bbox_source"]["fp"],
+                "bbox_fn": counts["bbox_source"]["fn"],
+                "mask_component_tp": counts["mask_component"]["tp"],
+                "mask_component_fp": counts["mask_component"]["fp"],
+                "mask_component_fn": counts["mask_component"]["fn"],
+                "bbox_component_tp": counts["bbox_component"]["tp"],
+                "bbox_component_fp": counts["bbox_component"]["fp"],
+                "bbox_component_fn": counts["bbox_component"]["fn"],
+            }
+
+        overall_table = {
+            "Segm Precision": results["segm_precision"],
+            "Segm Recall": results["segm_recall"],
+            "Segm F1": results["segm_f1"],
+            "Bbox Precision": results["bbox_precision"],
+            "Bbox Recall": results["bbox_recall"],
+            "Bbox F1": results["bbox_f1"],
+            "Segm Comp F1": results["segm_component_f1"],
+            "Bbox Comp F1": results["bbox_component_f1"],
+        }
+        self._logger.info("Component Association (overall):\n" + create_small_table(overall_table))
+
+        for class_name, metrics in class_results.items():
+            info = f"Component Association ({class_name}):\n"
+            info += "__________________________________________________________\n"
+            info += "|:--------------:| Source Level Metrics |:--------------:|\n"
+            segm_source_table = {
+                "Segm Precision": metrics["segm_precision"],
+                "Segm Recall": metrics["segm_recall"],
+                "Segm F1": metrics["segm_f1"],
+                "Bbox Precision": metrics["bbox_precision"],
+                "Bbox Recall": metrics["bbox_recall"],
+                "Bbox F1": metrics["bbox_f1"],
+            }
+            info += create_small_table(segm_source_table) + "\n"
+            info += "____________________________________________________\n"
+            info += "|:--:| Component Level Metrics |:--:|\n"
+            segm_component_table = {
+                "Segm Comp Recall": metrics["segm_component_recall"],
+                "Bbox Comp Recall": metrics["bbox_component_recall"],
+            }
+            info += create_small_table(segm_component_table)
+            self._logger.info(info)
+
+        flat_class_results = {}
+        for class_name, metrics in class_results.items():
+            for metric_name, metric_value in metrics.items():
+                flat_class_results[f"{class_name}_{metric_name}"] = metric_value
+
+        return copy.deepcopy({
+            "COMP_ASSOC": results,
+            "COMP_ASSOC_CLASSWISE": flat_class_results,
+        })
+
+    def _gather_predictions_with_classwise_counts(self):
+        overall = {
+            "mask_source": {"tp": 0, "fp": 0, "fn": 0},
+            "bbox_source": {"tp": 0, "fp": 0, "fn": 0},
+            "mask_component": {"tp": 0, "fp": 0, "fn": 0},
+            "bbox_component": {"tp": 0, "fp": 0, "fn": 0},
+        }
+        classwise = {}
+
+        for prediction in self._predictions:
+            image_id = prediction["image_id"]
+            anns, image_metadata = self._load_image_context(image_id)
+            pred_instances = self._get_all_valid_instances(prediction)
+
+            gt_cat = self._catalogue_constructor.build_gt_catalogue(image_id, image_metadata, anns)
+
+            if pred_instances is None:
+                mask_pred_cat = []
+                bbox_pred_cat = []
+            else:
+                mask_pred_cat = self._catalogue_constructor.build_pred_catalogue(
+                    image_id, image_metadata, pred_instances, mask=True
+                )
+                bbox_pred_cat = self._catalogue_constructor.build_pred_catalogue(
+                    image_id, image_metadata, pred_instances, mask=False
+                )
+
+            mask_compare = self._catalogue_constructor.compare_catalogues(gt_cat, mask_pred_cat)
+            bbox_compare = self._catalogue_constructor.compare_catalogues(gt_cat, bbox_pred_cat)
+            mask_compare_comp = self._catalogue_constructor.compare_catalogues_componentwise(gt_cat, mask_pred_cat)
+            bbox_compare_comp = self._catalogue_constructor.compare_catalogues_componentwise(gt_cat, bbox_pred_cat)
+
+            self._merge_summary(overall["mask_source"], mask_compare["summary"]["overall"])
+            self._merge_summary(overall["bbox_source"], bbox_compare["summary"]["overall"])
+            self._merge_summary(overall["mask_component"], mask_compare_comp["summary"]["overall"])
+            self._merge_summary(overall["bbox_component"], bbox_compare_comp["summary"]["overall"])
+
+            self._merge_classwise_summary(
+                classwise,
+                mask_compare["summary"]["classwise"],
+                bucket="mask_source",
+            )
+            self._merge_classwise_summary(
+                classwise,
+                bbox_compare["summary"]["classwise"],
+                bucket="bbox_source",
+            )
+            self._merge_classwise_summary(
+                classwise,
+                mask_compare_comp["summary"]["classwise"],
+                bucket="mask_component",
+            )
+            self._merge_classwise_summary(
+                classwise,
+                bbox_compare_comp["summary"]["classwise"],
+                bucket="bbox_component",
+            )
+
+        return overall, classwise
+
+    def _load_image_context(self, image_id: int):
+        ann_ids = self.coco.getAnnIds(imgIds=[image_id], iscrowd=None)
+        anns = self.coco.loadAnns(ann_ids)
+        img_meta = self.coco.loadImgs([image_id])[0].get("metadata", {})
+        return anns, img_meta
+
+    def _get_all_valid_instances(self, prediction):
+        instances = prediction.get("instances")
+        if instances is None or len(instances) == 0:
+            return None
+
+        scores = instances.scores
+        valid_indices = scores >= self._score_threshold
+        if valid_indices.sum() == 0:
+            return None
+        return instances[valid_indices]
+
+    def _merge_summary(self, target, summary_overall):
+        target["tp"] += int(summary_overall.get("TP", 0))
+        target["fp"] += int(summary_overall.get("FP", 0))
+        target["fn"] += int(summary_overall.get("FN", 0))
+
+    def _merge_classwise_summary(self, aggregate, summary_classwise, bucket: str):
+        for class_name, counts in summary_classwise.items():
+            if class_name not in aggregate:
+                aggregate[class_name] = {
+                    "mask_source": {"tp": 0, "fp": 0, "fn": 0},
+                    "bbox_source": {"tp": 0, "fp": 0, "fn": 0},
+                    "mask_component": {"tp": 0, "fp": 0, "fn": 0},
+                    "bbox_component": {"tp": 0, "fp": 0, "fn": 0},
+                }
+            aggregate[class_name][bucket]["tp"] += int(counts.get("TP", 0))
+            aggregate[class_name][bucket]["fp"] += int(counts.get("FP", 0))
+            aggregate[class_name][bucket]["fn"] += int(counts.get("FN", 0))
+
+    def _metrics_from_counts(self, counts, prefix: str):
+        tp = counts["tp"]
+        fp = counts["fp"]
+        fn = counts["fn"]
+        precision = self._precision(tp, fp)
+        recall = self._recall(tp, fn)
+        return {
+            f"{prefix}_accuracy": self._accuracy(tp, fp, fn),
+            f"{prefix}_precision": precision,
+            f"{prefix}_recall": recall,
+            f"{prefix}_f1": self._f1(precision, recall),
+        }
     
