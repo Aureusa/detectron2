@@ -23,16 +23,14 @@ DATASETS:
   PRECOMPUTED_PROPOSAL_TOPK_TEST: 10000
 DATALOADER:
   NUM_WORKERS: 4  # Adjust based on your CPU cores
-  SAMPLER_TRAIN: "RepeatFactorTrainingSampler"
-  REPEAT_THRESHOLD: 0.3  # images with category frequency below 30% get repeated
 TRAINER:
   NAME: "GRGTrainer"
 SOLVER:
   IMS_PER_BATCH: 16  # Adjust based on your GPU memory
   BASE_LR: 0.001
-  STEPS: (320000, 420000)  # Adjust based on your dataset size and desired schedule
-  MAX_ITER: 480000
-  CHECKPOINT_PERIOD: 20000
+  STEPS: (690000, 920000) # 60% and 80% of the total iterations # Adjust based on your dataset size and desired schedule
+  MAX_ITER: 1150000
+  CHECKPOINT_PERIOD: 50000
   WARMUP_ITERS: 1000
 INPUT:
   MIN_SIZE_TRAIN: (300,)  # Match your image size
@@ -43,4 +41,4 @@ INPUT:
 TEST:
   EVAL_PERIOD: 20000  # Evaluate every 20000 iterations
   EVALUATOR: "B2SMaskedRCNNEvaluator"
-OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/mask_rcnn_b2s_rgz_baseline"
+OUTPUT_DIR: "/home/aurelsa/projects/detectron2/projects/LoTSS-GRG-detect/output/rgz_baseline"

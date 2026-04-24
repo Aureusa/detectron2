@@ -62,3 +62,4 @@ results
 
 # LoTSS-GRG-detect specific
 /projects/LoTSS-GRG-detect/configs/model_configs/old/
+/projects/LoTSS-GRG-detect/configs/dataset_configs/

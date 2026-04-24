@@ -37,7 +37,7 @@ SOLVER:
   BASE_LR: 0.001
   STEPS: (690000, 920000) # 60% and 80% of the total iterations # Adjust based on your dataset size and desired schedule
   MAX_ITER: 1150000
-  CHECKPOINT_PERIOD: 20000
+  CHECKPOINT_PERIOD: 50000
   WARMUP_ITERS: 1000
 INPUT:
   MIN_SIZE_TRAIN: (300,)  # Match your image size
@@ -48,7 +48,7 @@ INPUT:
 TEST:
   EVAL_PERIOD: 20000  # Evaluate every 20000 iterations
   EVALUATOR: "B2SMaskedRCNNEvaluator"
-OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/mask_rcnn_b2s_rgz_v2"
+OUTPUT_DIR: "/home/aurelsa/projects/detectron2/projects/LoTSS-GRG-detect/output/mask_rcnn_b2s_rgz_v2"
 
 
 # V2:

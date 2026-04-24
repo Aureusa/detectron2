@@ -43,7 +43,7 @@ INPUT:
 TEST:
   EVAL_PERIOD: 20000  # Evaluate every 20000 iterations
   EVALUATOR: "B2SMaskedRCNNEvaluator"
-OUTPUT_DIR: "/home/s4861264/detectron2/projects/LoTSS-GRG-detect/output/mask_rcnn_b2s_rgz_v1"
+OUTPUT_DIR: "/home/aurelsa/projects/detectron2/projects/LoTSS-GRG-detect/output/mask_rcnn_b2s_rgz_v1"
 
 # V1:
 # - Removed class weight from cross-entropy loss in Fast R-CNN head.

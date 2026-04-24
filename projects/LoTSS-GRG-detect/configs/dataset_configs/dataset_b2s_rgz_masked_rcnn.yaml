@@ -1,7 +1,7 @@
 # Dataset configuration for GRG detection
 DATASET_NAME: "b2s"
 TYPE: "b2s_masked_rcnn"
-DATA_ROOT: "/home/s4861264/project_data/b2s_rgz_masked_rcnn_full_split"
+DATA_ROOT: "/home/aurelsa/project_data/rgz_full_dataset_split"
 
 TRAIN:
   EXISTS: True
