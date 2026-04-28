@@ -916,100 +916,124 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             self._logger.warning("[ComponentAssociationEvaluator] Did not receive valid predictions.")
             return {}
 
-        overall, classwise = self._gather_predictions_with_classwise_counts()
+        overall = self._gather_predictions()
 
-        results = {
-            **self._metrics_from_counts(overall["mask_source"], prefix="segm"),
-            **self._metrics_from_counts(overall["bbox_source"], prefix="bbox"),
-            **self._metrics_from_counts(overall["mask_component"], prefix="segm_component"),
-            **self._metrics_from_counts(overall["bbox_component"], prefix="bbox_component"),
-            "mask_tp": overall["mask_source"]["tp"],
-            "mask_fp": overall["mask_source"]["fp"],
-            "mask_fn": overall["mask_source"]["fn"],
-            "bbox_tp": overall["bbox_source"]["tp"],
-            "bbox_fp": overall["bbox_source"]["fp"],
-            "bbox_fn": overall["bbox_source"]["fn"],
-            "mask_component_tp": overall["mask_component"]["tp"],
-            "mask_component_fp": overall["mask_component"]["fp"],
-            "mask_component_fn": overall["mask_component"]["fn"],
-            "bbox_component_tp": overall["bbox_component"]["tp"],
-            "bbox_component_fp": overall["bbox_component"]["fp"],
-            "bbox_component_fn": overall["bbox_component"]["fn"],
+        comp_map = {
+            "tp": "tp_component",
+            "fp": "fp_component",
+            "fn": "fn_component",
+        }
+        source_map = {
+            "tp": "tp_source",
+            "fp": "fp_source",
+            "fn": "fn_source",
         }
 
-        class_results = {}
-        for class_name, counts in sorted(classwise.items(), key=lambda item: item[0]):
-            class_results[class_name] = {
-                **self._metrics_from_counts(counts["mask_source"], prefix="segm"),
-                **self._metrics_from_counts(counts["bbox_source"], prefix="bbox"),
-                **self._metrics_from_counts(counts["mask_component"], prefix="segm_component"),
-                **self._metrics_from_counts(counts["bbox_component"], prefix="bbox_component"),
-                "mask_tp": counts["mask_source"]["tp"],
-                "mask_fp": counts["mask_source"]["fp"],
-                "mask_fn": counts["mask_source"]["fn"],
-                "bbox_tp": counts["bbox_source"]["tp"],
-                "bbox_fp": counts["bbox_source"]["fp"],
-                "bbox_fn": counts["bbox_source"]["fn"],
-                "mask_component_tp": counts["mask_component"]["tp"],
-                "mask_component_fp": counts["mask_component"]["fp"],
-                "mask_component_fn": counts["mask_component"]["fn"],
-                "bbox_component_tp": counts["bbox_component"]["tp"],
-                "bbox_component_fp": counts["bbox_component"]["fp"],
-                "bbox_component_fn": counts["bbox_component"]["fn"],
-            }
-
-        overall_table = {
-            "Segm Precision": results["segm_precision"],
-            "Segm Recall": results["segm_recall"],
-            "Segm F1": results["segm_f1"],
-            "Bbox Precision": results["bbox_precision"],
-            "Bbox Recall": results["bbox_recall"],
-            "Bbox F1": results["bbox_f1"],
-            "Segm Comp F1": results["segm_component_f1"],
-            "Bbox Comp F1": results["bbox_component_f1"],
+        # ======== Mask results ========
+        mask_overall_results = {
+            **self._metrics_from_counts(overall["mask_overall"], prefix="mask_source_overall", map=source_map),
+            **self._metrics_from_counts(overall["mask_overall"], prefix="mask_component_overall", map=comp_map),
+            **self._add_prefix(overall["mask_overall"], prefix="mask_overall"),
         }
-        self._logger.info("Component Association (overall):\n" + create_small_table(overall_table))
+        mask_scs_results = {
+            **self._metrics_from_counts(overall["mask_scs"], prefix="mask_source_scs", map=source_map),
+            **self._metrics_from_counts(overall["mask_scs"], prefix="mask_component_scs", map=comp_map),
+            **self._add_prefix(overall["mask_scs"], prefix="mask_scs"),
+        }
+        mask_mcs_results = {
+            **self._metrics_from_counts(overall["mask_mcs"], prefix="mask_source_mcs", map=source_map),
+            **self._metrics_from_counts(overall["mask_mcs"], prefix="mask_component_mcs", map=comp_map),
+            **self._add_prefix(overall["mask_mcs"], prefix="mask_mcs"),
+        }
 
-        for class_name, metrics in class_results.items():
-            info = f"Component Association ({class_name}):\n"
-            info += "__________________________________________________________\n"
-            info += "|:--------------:| Source Level Metrics |:--------------:|\n"
-            segm_source_table = {
-                "Segm Precision": metrics["segm_precision"],
-                "Segm Recall": metrics["segm_recall"],
-                "Segm F1": metrics["segm_f1"],
-                "Bbox Precision": metrics["bbox_precision"],
-                "Bbox Recall": metrics["bbox_recall"],
-                "Bbox F1": metrics["bbox_f1"],
-            }
-            info += create_small_table(segm_source_table) + "\n"
-            info += "____________________________________________________\n"
-            info += "|:--:| Component Level Metrics |:--:|\n"
-            segm_component_table = {
-                "Segm Comp Recall": metrics["segm_component_recall"],
-                "Bbox Comp Recall": metrics["bbox_component_recall"],
-            }
-            info += create_small_table(segm_component_table)
-            self._logger.info(info)
+        # ======== Bbox results ========
+        bbox_overall_results = {
+            **self._metrics_from_counts(overall["bbox_overall"], prefix="bbox_source_overall", map=source_map),
+            **self._metrics_from_counts(overall["bbox_overall"], prefix="bbox_component_overall", map=comp_map),
+            **self._add_prefix(overall["bbox_overall"], prefix="bbox_overall"),
+        }
+        bbox_scs_results = {
+            **self._metrics_from_counts(overall["bbox_scs"], prefix="bbox_source_scs", map=source_map),
+            **self._metrics_from_counts(overall["bbox_scs"], prefix="bbox_component_scs", map=comp_map),
+            **self._add_prefix(overall["bbox_scs"], prefix="bbox_scs"),
+        }
+        bbox_mcs_results = {
+            **self._metrics_from_counts(overall["bbox_mcs"], prefix="bbox_source_mcs", map=source_map),
+            **self._metrics_from_counts(overall["bbox_mcs"], prefix="bbox_component_mcs", map=comp_map),
+            **self._add_prefix(overall["bbox_mcs"], prefix="bbox_mcs"),
+        }
 
-        flat_class_results = {}
-        for class_name, metrics in class_results.items():
-            for metric_name, metric_value in metrics.items():
-                flat_class_results[f"{class_name}_{metric_name}"] = metric_value
+        # ======= Log overall results ========
+        self._log_results(mask_overall_results, bbox_overall_results, type_desc="overall")
+
+        # ======= Log SCS results ========
+        self._log_results(mask_scs_results, bbox_scs_results, type_desc="scs")
+
+        # ======= Log MCS results ========
+        self._log_results(mask_mcs_results, bbox_mcs_results, type_desc="mcs")
+
+        # Flatten classwise results for easier access in downstream analysis
+        flat_class_results = {
+            "mask_overall_results": mask_overall_results,
+            "mask_scs_results": mask_scs_results,
+            "mask_mcs_results": mask_mcs_results,
+            "bbox_overall_results": bbox_overall_results,
+            "bbox_scs_results": bbox_scs_results,
+            "bbox_mcs_results": bbox_mcs_results,
+        }
 
         return copy.deepcopy({
-            "COMP_ASSOC": results,
-            "COMP_ASSOC_CLASSWISE": flat_class_results,
+            "CAE": flat_class_results
         })
 
-    def _gather_predictions_with_classwise_counts(self):
-        overall = {
-            "mask_source": {"tp": 0, "fp": 0, "fn": 0},
-            "bbox_source": {"tp": 0, "fp": 0, "fn": 0},
-            "mask_component": {"tp": 0, "fp": 0, "fn": 0},
-            "bbox_component": {"tp": 0, "fp": 0, "fn": 0},
+    def _log_results(self, mask_results, bbox_results, type_desc):
+        source_overall_table = {
+            "Segm Precision": mask_results[f"mask_source_{type_desc}_precision"],
+            "Segm Recall": mask_results[f"mask_source_{type_desc}_recall"],
+            "Segm F1": mask_results[f"mask_source_{type_desc}_f1"],
+            "Bbox Precision": bbox_results[f"bbox_source_{type_desc}_precision"],
+            "Bbox Recall": bbox_results[f"bbox_source_{type_desc}_recall"],
+            "Bbox F1": bbox_results[f"bbox_source_{type_desc}_f1"],
         }
-        classwise = {}
+        component_overall_table = {
+            "Segm Precision": mask_results[f"mask_component_{type_desc}_precision"],
+            "Segm Recall": mask_results[f"mask_component_{type_desc}_recall"],
+            "Segm F1": mask_results[f"mask_component_{type_desc}_f1"],
+            "Bbox Precision": bbox_results[f"bbox_component_{type_desc}_precision"],
+            "Bbox Recall": bbox_results[f"bbox_component_{type_desc}_recall"],
+            "Bbox F1": bbox_results[f"bbox_component_{type_desc}_f1"],
+        }
+
+        info = f"Component Association ({type_desc.upper()}):\n"
+        info += "____________________________________________________________________________________________\n"
+        info += "|:-------------------------------:| Source Level Metrics |:-------------------------------:|\n"
+        info += create_small_table(source_overall_table) + "\n"
+        info += "____________________________________________________________________________________________\n"
+        info += "|:-----------------------------:| Component Level Metrics |:------------------------------:|\n"
+        info += create_small_table(component_overall_table)
+        self._logger.info(info)
+
+    def _gather_predictions(self):
+        base_dict = {
+            "tp_source": 0,
+            "fp_source": 0,
+            "fn_source": 0,
+            "tp_component": 0,
+            "fp_component": 0,
+            "fn_component": 0,
+            "Perfect match": 0,
+            "Partial match": 0,
+            "Wrong class": 0,
+            "No match": 0,
+            "Missed source": 0,
+            "Hallucinated source": 0,
+        }
+        results = {
+            "mask_scs": base_dict.copy(),
+            "mask_mcs": base_dict.copy(),
+            "bbox_scs": base_dict.copy(),
+            "bbox_mcs": base_dict.copy(),
+        }
 
         for prediction in self._predictions:
             image_id = prediction["image_id"]
@@ -1019,8 +1043,8 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             gt_cat = self._catalogue_constructor.build_gt_catalogue(image_id, image_metadata, anns)
 
             if pred_instances is None:
-                mask_pred_cat = []
-                bbox_pred_cat = []
+                mask_pred_cat = {}
+                bbox_pred_cat = {}
             else:
                 mask_pred_cat = self._catalogue_constructor.build_pred_catalogue(
                     image_id, image_metadata, pred_instances, mask=True
@@ -1029,38 +1053,27 @@ class ComponentAssociationEvaluator(GRGEvaluator):
                     image_id, image_metadata, pred_instances, mask=False
                 )
 
-            mask_compare = self._catalogue_constructor.compare_catalogues(gt_cat, mask_pred_cat)
-            bbox_compare = self._catalogue_constructor.compare_catalogues(gt_cat, bbox_pred_cat)
-            mask_compare_comp = self._catalogue_constructor.compare_catalogues_componentwise(gt_cat, mask_pred_cat)
-            bbox_compare_comp = self._catalogue_constructor.compare_catalogues_componentwise(gt_cat, bbox_pred_cat)
-
-            self._merge_summary(overall["mask_source"], mask_compare["summary"]["overall"])
-            self._merge_summary(overall["bbox_source"], bbox_compare["summary"]["overall"])
-            self._merge_summary(overall["mask_component"], mask_compare_comp["summary"]["overall"])
-            self._merge_summary(overall["bbox_component"], bbox_compare_comp["summary"]["overall"])
-
-            self._merge_classwise_summary(
-                classwise,
-                mask_compare["summary"]["classwise"],
-                bucket="mask_source",
+            _, mask_counts_scs, mask_counts_mcs = self._catalogue_constructor.compare_catalogues(
+                gt_cat, mask_pred_cat
             )
-            self._merge_classwise_summary(
-                classwise,
-                bbox_compare["summary"]["classwise"],
-                bucket="bbox_source",
-            )
-            self._merge_classwise_summary(
-                classwise,
-                mask_compare_comp["summary"]["classwise"],
-                bucket="mask_component",
-            )
-            self._merge_classwise_summary(
-                classwise,
-                bbox_compare_comp["summary"]["classwise"],
-                bucket="bbox_component",
+            _, bbox_counts_scs, bbox_counts_mcs = self._catalogue_constructor.compare_catalogues(
+                gt_cat, bbox_pred_cat
             )
 
-        return overall, classwise
+            self._merge_counts(results["mask_scs"], mask_counts_scs)
+            self._merge_counts(results["mask_mcs"], mask_counts_mcs)
+            self._merge_counts(results["bbox_scs"], bbox_counts_scs)
+            self._merge_counts(results["bbox_mcs"], bbox_counts_mcs)
+
+        # Sum both SCS and MCS for overall source-level metrics
+        mask_overall = base_dict.copy()
+        bbox_overall = base_dict.copy()
+        for key in base_dict.keys():
+            mask_overall[key] = results["mask_scs"][key] + results["mask_mcs"][key]
+            bbox_overall[key] = results["bbox_scs"][key] + results["bbox_mcs"][key]
+        results["mask_overall"] = mask_overall
+        results["bbox_overall"] = bbox_overall
+        return results
 
     def _load_image_context(self, image_id: int):
         ann_ids = self.coco.getAnnIds(imgIds=[image_id], iscrowd=None)
@@ -1079,10 +1092,9 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             return None
         return instances[valid_indices]
 
-    def _merge_summary(self, target, summary_overall):
-        target["tp"] += int(summary_overall.get("TP", 0))
-        target["fp"] += int(summary_overall.get("FP", 0))
-        target["fn"] += int(summary_overall.get("FN", 0))
+    def _merge_counts(self, aggregate, new_counts):
+        for key, value in new_counts.items():
+            aggregate[key] += value
 
     def _merge_classwise_summary(self, aggregate, summary_classwise, bucket: str):
         for class_name, counts in summary_classwise.items():
@@ -1097,10 +1109,10 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             aggregate[class_name][bucket]["fp"] += int(counts.get("FP", 0))
             aggregate[class_name][bucket]["fn"] += int(counts.get("FN", 0))
 
-    def _metrics_from_counts(self, counts, prefix: str):
-        tp = counts["tp"]
-        fp = counts["fp"]
-        fn = counts["fn"]
+    def _metrics_from_counts(self, counts, prefix: str, map: dict):
+        tp = counts[map["tp"]]
+        fp = counts[map["fp"]]
+        fn = counts[map["fn"]]
         precision = self._precision(tp, fp)
         recall = self._recall(tp, fn)
         return {
@@ -1109,4 +1121,7 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             f"{prefix}_recall": recall,
             f"{prefix}_f1": self._f1(precision, recall),
         }
+    
+    def _add_prefix(self, dictionary, prefix: str):
+        return {f"{prefix}_{key.lower().replace(' ', '_')}": value for key, value in dictionary.items()}
     

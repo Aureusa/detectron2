@@ -1,3 +1,9 @@
+import random
+import numpy as np
+
+from scipy.optimize import linear_sum_assignment
+
+
 class PredictionObject:
     def __init__(self, prediction):
         self.prediction = prediction
@@ -22,15 +28,23 @@ class PredictionObject:
 
 
 class CatalogueConstructor:   
-    def build_gt_catalogue(self, image_id, image_metadata, anns):
+    def build_gt_catalogue(self, image_id: int, image_metadata: dict, anns: list[dict]):
         """
-        Returns a list of rows:
-        {"comp_name": ..., "source_name": ..., "class": ..., "image_id": ...}
+        Treats each GT annotations as a source, and assigns components to it based on the instance_positions.
+        Returns a dict: source_name -> {"components": set(...), "class": ..., "score": None, "image_id": ...}
+
+        :param image_id: ID of the image
+        :type image_id: int
+        :param image_metadata: Metadata of the image, containing component and source info
+        :type image_metadata: dict
+        :param anns: List of GT annotations for the image, each with "category_id" and "instance_positions"
+        :type anns: list[dict]
         """
         pos_map = self._build_position_to_component_map(image_metadata)
-        rows = []
+        sources = {}
 
         for ann in anns:
+            components = set()
             class_name = "MCS" if ann["category_id"] == 2 else "SCS"
             source_name = None
             for pos in ann["instance_positions"]:
@@ -39,284 +53,349 @@ class CatalogueConstructor:
                     continue
                 if source_name is None:
                     source_name = comp_info["source_name"]
-                rows.append({
-                    "comp_name": comp_info["component_name"],
-                    "source_name": comp_info["source_name"],
-                    "class": class_name,
-                    "pred_idx": -1,  # GT rows have pred_idx of -1
-                    "pred_score": -1,  # GT rows have pred_score of -1
-                    "image_id": image_id,
-                })
-        return rows
+                
+                component_name = comp_info["component_name"]
+                components.add(component_name)
 
-    def build_pred_catalogue(self, image_id, image_metadata, pred_instances, mask: bool = False):
+            if source_name is not None:
+                sources[source_name] = {
+                    "components": components,
+                    "class": class_name,
+                    "score": None, # for GT, score is not applicable but kept for consistency with pred format
+                    "image_id": image_id,
+                }
+        return sources
+
+    def build_pred_catalogue(self, image_id: int, image_metadata: dict, pred_instances: list, mask: bool = False):
         """
-        For each prediction, find which GT annotation it matches (by containment),
-        then emit one row per component position that falls inside the prediction.
+        For each predicted instance, determine which components it covers (either via mask or bounding box),
+        which gives a source with assigned components, predicted class, and score.
+
+        :param image_id: ID of the image
+        :type image_id: int
+        :param image_metadata: Metadata of the image, containing component and source info
+        :type image_metadata: dict
+        :param pred_instances: List of predicted instances for the image
+        :type pred_instances: list
+        :param mask: Whether to use masks or bounding boxes for component assignment
+        :type mask: bool
         """
         pos_map = self._build_position_to_component_map(image_metadata)
-        rows = []
+        sources = {}
 
         if pred_instances is None:
-            return rows
+            return sources
         
-        for pred_idx in range(len(pred_instances)):
+        for pred_idx in range(len(pred_instances)): # Loop over each predicted instance == source
             pred = pred_instances[pred_idx]
             pred_obj = PredictionObject(pred)
             if mask:
-                curr_rows = self._build_pred_catalogue_with_masks(image_id, pred_idx, pred_obj, pos_map)
+                components, pred_class, pred_score = self._build_pred_catalogue_with_masks(pred_obj, pos_map)
             else:
-                curr_rows = self._build_pred_catalogue_with_boxes(image_id, pred_idx, pred_obj, pos_map)
-            rows.extend(curr_rows)
-        return rows
-    
-    def compare_catalogues_componentwise(self, gt_rows: list[dict], pred_rows: list[dict]) -> dict:
+                components, pred_class, pred_score = self._build_pred_catalogue_with_boxes(pred_obj, pos_map)
+            source_name = f"pred_source_{pred_idx}"
+            sources[source_name] = {
+                "components": components,
+                "class": pred_class,
+                "score": pred_score,
+                "image_id": image_id,
+            }
+        return sources
+
+    def compare_catalogues(self, gt_cat: dict, pred_cat: dict) -> dict:
         """
-        Compare GT and predicted catalogues at the component level, with classwise breakdown.
-
-        TP: component detected under correct source
-        FN: component not detected, or detected under wrong source
-        FP: never happens
-        Precision is always 1.0, recall = TP / (TP + FN) = F1 = recall
+        Compare GT and predicted catalogues at the source level.
         """
-        gt_comp_to_source = {r["comp_name"]: r["source_name"] for r in gt_rows}
-        gt_comp_to_class = {r["comp_name"]: r["class"] for r in gt_rows}
+        set_gt = self._set_constructor(gt_cat)
+        set_pred = self._set_constructor(pred_cat)
 
-        pred_comp_to_source = {}
-        pred_comp_to_class = {}
-        pred_comp_best_score = {}
+        C, c_array = self._similarity_matrix(set_gt, set_pred)
+        opt_assignment = self._hungarian_algorithm(set_gt, set_pred, C, c_array)
 
-        for r in pred_rows:
-            comp = r["comp_name"]
-            score = r["pred_score"]
-            if comp not in pred_comp_best_score or score > pred_comp_best_score[comp]:
-                pred_comp_best_score[comp] = score
-                pred_comp_to_source[comp] = r["source_name"]
-                pred_comp_to_class[comp] = r["class"]
+        results, aggregated_counts_scs, aggregated_counts_mcs = self._compare_catalogues_sourcewise(
+            opt_assignment, set_gt, set_pred
+        )
+        return results, aggregated_counts_scs, aggregated_counts_mcs
 
-        results = []
+    def _compare_catalogues_sourcewise(self, opt_assignment: dict, set_gt: dict, set_pred: dict) -> dict:
+        """Compare GT and predicted catalogues at the source level"""
+        aggregated_counts_scs = {
+            "tp_source": 0,
+            "fp_source": 0,
+            "fn_source": 0,
+            "tp_component": 0,
+            "fp_component": 0,
+            "fn_component": 0,
+            "Perfect match": 0,
+            "Partial match": 0,
+            "Wrong class": 0,
+            "No match": 0,
+            "Missed source": 0,
+            "Hallucinated source": 0,
+        }
+        aggregated_counts_mcs = {
+            "tp_source": 0,
+            "fp_source": 0,
+            "fn_source": 0,
+            "tp_component": 0,
+            "fp_component": 0,
+            "fn_component": 0,
+            "Perfect match": 0,
+            "Partial match": 0,
+            "Wrong class": 0,
+            "No match": 0,
+            "Missed source": 0,
+            "Hallucinated source": 0,
+        }
+        results = {}
+        for source_name, assign_info in opt_assignment.items():
+            similarity = assign_info["similarity"]
+            gt_class = assign_info["gt_class"]
+            pred_class = assign_info["pred_class"]
+            num_gt_components = assign_info["num_gt_components"]
+            num_pred_components = assign_info["num_pred_components"]
+            num_correct_components = assign_info["num_correct_components"]
+            num_missed_components = assign_info["num_missed_components"]
+            num_hallucinated_components = assign_info["num_hallucinated_components"]
+            pred_score = assign_info["pred_score"]
 
-        for comp_name, gt_source in gt_comp_to_source.items():
-            gt_class = gt_comp_to_class[comp_name]
-            pred_source = pred_comp_to_source.get(comp_name)
-            pred_class = pred_comp_to_class.get(comp_name)
+            if similarity == 1.0 and gt_class == pred_class:
+                source_status = "TP"
+                reason = "Perfect match"
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "tp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Perfect match", pred_class)
+            elif similarity > 0.0 and gt_class == pred_class:
+                source_status = "FP"
+                reason = "Partial match"
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Partial match", pred_class)
+            elif similarity > 0.0 and gt_class != pred_class:
+                source_status = "FP"
+                reason = "Wrong class"
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Wrong class", pred_class)
+            elif similarity == 0.0:
+                source_status = "FN"
+                reason = "No match"
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", gt_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "No match", gt_class)
 
-            if pred_source is None:
-                results.append({
-                    "comp_name": comp_name,
-                    "gt_source": gt_source,
-                    "pred_source": None,
-                    "gt_class": gt_class,
-                    "pred_class": None,
-                    "status": "FN",
-                    "reason": "not detected",
-                })
-            elif pred_source == gt_source:
-                results.append({
-                    "comp_name": comp_name,
-                    "gt_source": gt_source,
-                    "pred_source": pred_source,
-                    "gt_class": gt_class,
-                    "pred_class": pred_class,
-                    "status": "TP",
-                    "reason": None,
-                })
-            else:
-                results.append({
-                    "comp_name": comp_name,
-                    "gt_source": gt_source,
-                    "pred_source": pred_source,
-                    "gt_class": gt_class,
-                    "pred_class": pred_class,
-                    "status": "FN",
-                    "reason": f"assigned to wrong source: {pred_source}",
-                })
+            componentwise = {
+                "tp": num_correct_components, # what I predicted that is real and correct
+                "fn": num_missed_components, # what I missed that is real
+                "fp": num_hallucinated_components # what I predicted that isn’t real
+            }
+            self._aggregate_counts(
+                aggregated_counts_scs,
+                aggregated_counts_mcs,
+                num_correct_components,
+                "tp_component",
+                pred_class
+            )
+            self._aggregate_counts(
+                aggregated_counts_scs,
+                aggregated_counts_mcs,
+                num_missed_components,
+                "fn_component",
+                pred_class
+            )
+            self._aggregate_counts(
+                aggregated_counts_scs,
+                aggregated_counts_mcs,
+                num_hallucinated_components,
+                "fp_component",
+                pred_class
+            )
 
-        # Only FP for components predicted that don't exist in GT at all
-        # for comp_name, pred_source in pred_comp_to_source.items():
-        #     if comp_name not in gt_comp_to_source:
-        #         results.append({
-        #             "comp_name": comp_name,
-        #             "gt_source": None,
-        #             "pred_source": pred_source,
-        #             "gt_class": None,
-        #             "pred_class": pred_comp_to_class[comp_name],
-        #             "status": "FP",
-        #             "reason": "hallucinated component",
-        #         })
-
-        # # Wrong-source detections also generate a FP entry
-        # for r in list(results):
-        #     if r["status"] == "FN" and r["reason"] and "wrong source" in r["reason"]:
-        #         results.append({
-        #             "comp_name": r["comp_name"],
-        #             "gt_source": None,
-        #             "pred_source": r["pred_source"],
-        #             "gt_class": None,
-        #             "pred_class": r["pred_class"],
-        #             "status": "FP",
-        #             "reason": f"incorrectly assigned to {r['pred_source']} instead of {r['gt_source']}",
-        #         })
-
-        summary = self._compute_summary_classwise(results)
-        return {"results": results, "summary": summary}
-
-
-    def compare_catalogues(self, gt_rows: list[dict], pred_rows: list[dict]) -> dict:
-        """
-        Compare GT and predicted catalogues at the source level, with classwise breakdown.
-        """
-        gt_by_source = self._group_by_source(gt_rows)
-        pred_by_source = self._group_by_source(pred_rows)
-
-        results = []
-
-        for source_name, gt_comps in gt_by_source.items():
-            gt_comp_names = set(r["comp_name"] for r in gt_comps)
-            gt_class = gt_comps[0]["class"]
-            pred_comps = pred_by_source.get(source_name)
-
-            if pred_comps is None:
-                results.append({
-                    "source_name": source_name,
-                    "gt_class": gt_class,
-                    "pred_class": None,
-                    "gt_components": gt_comp_names,
-                    "pred_components": set(),
-                    "status": "FN",
-                    "missing_components": gt_comp_names,
-                    "extra_components": set(),
-                })
-                continue
-
-            pred_comp_names = set(r["comp_name"] for r in pred_comps)
-            pred_class = pred_comps[0]["class"]
-            missing = gt_comp_names - pred_comp_names
-            extra = pred_comp_names - gt_comp_names
-            status = "TP" if not missing and not extra else "FP"
-
-            results.append({
-                "source_name": source_name,
+            results[source_name] = {
+                "similarity": similarity,
                 "gt_class": gt_class,
                 "pred_class": pred_class,
-                "gt_components": gt_comp_names,
-                "pred_components": pred_comp_names,
-                "status": status,
-                "missing_components": missing,
-                "extra_components": extra,
-            })
+                "source_status": source_status,
+                "reason": reason,
+                "num_gt_components": num_gt_components,
+                "num_pred_components": num_pred_components,
+                "num_correct_components": num_correct_components,
+                "num_missed_components": num_missed_components,
+                "num_hallucinated_components": num_hallucinated_components,
+                "componentwise": componentwise,
+                "pred_score": pred_score,
+            }
 
-        for source_name, pred_comps in pred_by_source.items():
-            if source_name not in gt_by_source:
-                results.append({
-                    "source_name": source_name,
-                    "gt_class": None,
-                    "pred_class": pred_comps[0]["class"],
-                    "gt_components": set(),
-                    "pred_components": set(r["comp_name"] for r in pred_comps),
-                    "status": "FP",
-                    "missing_components": set(),
-                    "extra_components": set(r["comp_name"] for r in pred_comps),
-                })
+        # If not all sources were assigned,
+        # we can consider unassigned GT sources as FN and unassigned pred sources as FP
+        assigned_gt_sources = set(results.keys())
+        assigned_pred_sources = {info["assigned_to"] for info in opt_assignment.values()}
+        all_gt_sources = set(set_gt["set"].keys())
+        all_pred_sources = set(set_pred["set"].keys())
 
-        summary = self._compute_summary_classwise(results)
-        return {"results": results, "summary": summary}
+        unassigned_gt_sources = all_gt_sources - assigned_gt_sources
+        unassigned_pred_sources = all_pred_sources - assigned_pred_sources
 
+        for gt_source in unassigned_gt_sources:
+            pred_class = set_gt["class"][gt_source]
+            results[gt_source] = {
+                "similarity": 0.0,
+                "gt_class": set_gt["class"][gt_source],
+                "pred_class": None,
+                "source_status": "FN",
+                "reason": "Missed source",
+                "num_gt_components": len(set_gt["set"][gt_source]),
+                "num_pred_components": 0,
+                "num_correct_components": 0,
+                "num_missed_components": len(set_gt["set"][gt_source]),
+                "pred_score": 0.0,
+            }
+            self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", pred_class)
+            self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Missed source", pred_class)
 
-    def _compute_summary_classwise(self, results: list[dict]) -> dict:
-        """
-        Compute overall and per-class TP/FP/FN/precision/recall/F1.
-        Class is taken from gt_class for TP/FN, pred_class for FP.
-        """
-        classes = set()
-        for r in results:
-            if r["gt_class"]:
-                classes.add(r["gt_class"])
-            if r["pred_class"]:
-                classes.add(r["pred_class"])
-
-        def _metrics(tp, fp, fn):
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            return {"TP": tp, "FP": fp, "FN": fn, "precision": precision, "recall": recall, "f1": f1}
-
-        # Overall counts
-        overall_tp = sum(1 for r in results if r["status"] == "TP")
-        overall_fp = sum(1 for r in results if r["status"] == "FP")
-        overall_fn = sum(1 for r in results if r["status"] == "FN")
-
-        classwise = {}
-        for cls in classes:
-            # TP: correctly detected, gt_class matches
-            tp = sum(1 for r in results if r["status"] == "TP" and r["gt_class"] == cls)
-            # FN: missed, gt_class matches
-            fn = sum(1 for r in results if r["status"] == "FN" and r["gt_class"] == cls)
-            # FP: false alarm attributed to this class via pred_class
-            fp = sum(1 for r in results if r["status"] == "FP" and r["pred_class"] == cls)
-            classwise[cls] = _metrics(tp, fp, fn)
-
-        return {
-            "overall": _metrics(overall_tp, overall_fp, overall_fn),
-            "classwise": classwise,
-        }
-
-
-    def _compute_summary(self, results: list[dict]) -> dict:
-        """Keep for backwards compatibility — delegates to classwise."""
-        return self._compute_summary_classwise(results)
-
-    def _group_by_source(self, rows: list[dict]) -> dict:
-        """Group catalogue rows by source_name."""
-        grouped = {}
-        for row in rows:
-            source_name = row["source_name"]
-            if source_name not in grouped:
-                grouped[source_name] = []
-            grouped[source_name].append(row)
-        return grouped
+        for pred_source in unassigned_pred_sources:
+            pred_class = set_pred["class"][pred_source]
+            results[pred_source] = {
+                "similarity": 0.0,
+                "gt_class": None,
+                "pred_class": set_pred["class"][pred_source],
+                "source_status": "FP",
+                "reason": "Hallucinated source",
+                "num_gt_components": 0,
+                "num_pred_components": len(set_pred["set"][pred_source]),
+                "num_correct_components": 0,
+                "num_missed_components": 0,
+                "pred_score": set_pred["score"][pred_source],
+            }
+            self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+            self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Hallucinated source", pred_class)
+        return results, aggregated_counts_scs, aggregated_counts_mcs
     
-    def _build_pred_catalogue_with_masks(self, image_id: int, pred_idx: int, predictions: PredictionObject, pos_map: dict):
+    def _aggregate_counts(
+            self,
+            container_scs: dict,
+            container_mcs: dict,
+            num: int, field: str,
+            pred_class: str
+        ) -> None:
+        """
+        Helper to aggregate TP/FP/FN counts. It adds num to container[field], initializing it to 0 if not present.
+        Performs in-place update of container.
+        """
+        if pred_class == "SCS":
+            container = container_scs
+        else:
+            container = container_mcs
+
+        if field not in container:
+            container[field] = 0
+        container[field] += num
+
+    def _set_constructor(self, cat: dict) -> dict:
+        set_ = {"set": {}, "class": {}, "score": {}}
+        for source_name, info in cat.items():
+            components = info["components"]
+            class_ = info["class"]
+            score = info["score"]
+            set_["set"][source_name] = components
+            set_["class"][source_name] = class_
+            set_["score"][source_name] = score
+        return set_
+    
+    def _similarity_matrix(self, set_gt: dict, set_pred: dict) -> dict:
+        P = set_pred["set"]
+        G = set_gt["set"]
+
+        # Create a similarity matrix C of size N x M
+        C = {
+            "similarity_matrix": {},
+            "pred_comp": {},
+            "gt_comp": {},
+            "correct_comp": {},
+            "missed_comp": {},
+            "hallucinated_comp": {}
+        }
+        
+        for g_key, g_set in G.items():
+            C["similarity_matrix"][g_key] = {}
+            C["pred_comp"][g_key] = {}
+            C["gt_comp"][g_key] = {}
+            C["correct_comp"][g_key] = {}
+            C["missed_comp"][g_key] = {}
+            C["hallucinated_comp"][g_key] = {}
+            for p_key, p_set in P.items():
+                # Calculate the similarity between g_set and p_set
+                intersection = g_set.intersection(p_set)
+                union = g_set.union(p_set)
+                
+                num_intersection = len(intersection)
+                num_union = len(union)
+                if num_union > 0:
+                    similarity = num_intersection / num_union
+                else:
+                    similarity = 0.0
+
+                missed_comp = len(g_set - p_set)
+                hallucinated_comp = len(p_set - g_set)
+                gt_comp = len(g_set)
+                pred_comp = len(p_set)
+
+                # How many components in GT are covered by the prediction? (recall-like)
+                C["similarity_matrix"][g_key][p_key] = similarity
+                C["pred_comp"][g_key][p_key] = pred_comp
+                C["gt_comp"][g_key][p_key] = gt_comp
+                C["correct_comp"][g_key][p_key] = num_intersection
+                C["missed_comp"][g_key][p_key] = missed_comp
+                C["hallucinated_comp"][g_key][p_key] = hallucinated_comp
+        
+        c_array = np.array([[C["similarity_matrix"][g_key][p_key] for p_key in P.keys()] for g_key in G.keys()])
+        return C, c_array
+    
+    def _hungarian_algorithm(self, set_gt: dict, set_pred: dict, C, c_array: np.ndarray) -> dict:
+        row_ind, col_ind = linear_sum_assignment(-c_array)
+        
+        g_keys = list(set_gt["set"].keys())
+        p_keys = list(set_pred["set"].keys())
+        opt_assignment = {}
+        for g_idx, p_idx in zip(row_ind, col_ind):
+            g_key = g_keys[g_idx]
+            p_key = p_keys[p_idx]
+
+            opt_assignment[g_key] = {
+                "assigned_to": p_key,
+                "similarity": C["similarity_matrix"][g_key][p_key],
+                "num_gt_components": C["gt_comp"][g_key][p_key],
+                "num_pred_components": C["pred_comp"][g_key][p_key],
+                "num_correct_components": C["correct_comp"][g_key][p_key],
+                "num_missed_components": C["missed_comp"][g_key][p_key],
+                "num_hallucinated_components": C["hallucinated_comp"][g_key][p_key],
+                "gt_class": set_gt["class"][g_key],
+                "pred_class": set_pred["class"][p_key],
+                "pred_score": set_pred["score"][p_key],
+            }
+        return opt_assignment
+    
+    def _build_pred_catalogue_with_masks(self, predictions: PredictionObject, pos_map: dict):
         mask = predictions.get_pred_masks()
         pred_class = predictions.get_pred_classes()
         pred_score = predictions.get_pred_scores()
 
         # Check which positions fall inside the mask
-        rows = []
+        components = set()
         for pos, comp_info in pos_map.items():
             x, y = pos
             if mask[y, x]:  # Assuming mask is a 2D array where True indicates the predicted area
-                rows.append({
-                    "comp_name": comp_info["component_name"],
-                    "source_name": comp_info["source_name"],
-                    "class": pred_class,
-                    "pred_idx": pred_idx,
-                    "pred_score": pred_score,
-                    "image_id": image_id,
-                })
-        rows = self._resolve_duplicate_predictions(rows)
-        return rows
+                components.add(comp_info["component_name"])
+        return components, pred_class, pred_score
     
-    def _build_pred_catalogue_with_boxes(self, image_id: int, pred_idx: int, predictions: PredictionObject, pos_map: dict):
+    def _build_pred_catalogue_with_boxes(self, predictions: PredictionObject, pos_map: dict):
         x1, y1, x2, y2 = predictions.get_pred_boxes()
         pred_class = predictions.get_pred_classes()
         pred_score = predictions.get_pred_scores()
 
         # Check which positions fall inside the bounding box
-        rows = []
+        components = set()
         for pos, comp_info in pos_map.items():
             x, y = pos
             if x1 <= x <= x2 and y1 <= y <= y2:
-                rows.append({
-                    "comp_name": comp_info["component_name"],
-                    "source_name": comp_info["source_name"],
-                    "class": pred_class,
-                    "pred_idx": pred_idx,
-                    "pred_score": pred_score,
-                    "image_id": image_id,
-                })
-        rows = self._resolve_duplicate_predictions(rows)
-        return rows
+                components.add(comp_info["component_name"])
+        return components, pred_class, pred_score
     
     def _resolve_duplicate_predictions(self, pred_rows: list[dict]) -> list[dict]:
         """
