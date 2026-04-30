@@ -20,7 +20,8 @@ from detectron2.data.samplers import InferenceSampler
 # Import custom modules from parent directory
 from data.dataset_mapper import GRGDatasetMapper as NPZProposalDatasetMapper
 from evaluation.grg_evaluator import GRGEvaluator, B2SMaskedRCNNEvaluator
-\
+from evaluation.grg_evaluator import ComponentAssociationEvaluator as CAEvaluator
+
 from engine.backbone_freeze_hook import BackboneFreezeHook
 
 logger = logging.getLogger("LoTSS-GRG-detect.train")
@@ -54,17 +55,23 @@ class GRGTrainer(DefaultTrainer):
                 annotations_path=annotations_path,
                 score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
             )
+        elif cfg.TEST.EVALUATOR == "CAEvaluator":
+            evaluator = CAEvaluator(
+                coco_images=DatasetCatalog.get(dataset_name),
+                annotations_path=annotations_path,
+                score_threshold=cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST
+            )
         else:
             raise ValueError(
                 f"Unsupported evaluator type: {cfg.TEST.EVALUATOR}."
-                f" Must be 'B2SMaskedRCNNEvaluator' or 'GRGEvaluator'. Check your config file.")
+                f" Must be 'B2SMaskedRCNNEvaluator', 'GRGEvaluator', or 'CAEvaluator'. Check your config file.")
 
         return DatasetEvaluators([
-            COCOEvaluator(
-                dataset_name,
-                output_dir=output_folder,
-                tasks=("bbox", "segm")
-            ),
+            # COCOEvaluator(
+            #     dataset_name,
+            #     output_dir=output_folder,
+            #     tasks=("bbox", "segm")
+            # ),
             evaluator
         ])
     
@@ -117,5 +124,3 @@ class GRGTrainer(DefaultTrainer):
         if freeze_until_iter > 0:
             hooks.insert(0, BackboneFreezeHook(freeze_until_iter=freeze_until_iter))
         return hooks
-
-    
