@@ -2,6 +2,7 @@ import sys
 import logging
 from pathlib import Path
 import copy
+from collections.abc import Mapping
 
 # Add detectron2 to path (assumes detectron2 is in the parent directory structure)
 detectron2_root = Path(__file__).parent.parent.parent.parent
@@ -911,7 +912,7 @@ class ComponentAssociationEvaluator(GRGEvaluator):
         """Set score threshold for filtering predictions."""
         self._score_threshold = threshold
 
-    def evaluate(self):
+    def evaluate(self, flatten_results: bool = True):
         if len(self._predictions) == 0:
             self._logger.warning("[ComponentAssociationEvaluator] Did not receive valid predictions.")
             return {}
@@ -972,8 +973,8 @@ class ComponentAssociationEvaluator(GRGEvaluator):
         # ======= Log MCS results ========
         self._log_results(mask_mcs_results, bbox_mcs_results, type_desc="mcs")
 
-        # Flatten classwise results for easier access in downstream analysis
-        flat_class_results = {
+        # 
+        combined_results = {
             "mask_overall_results": mask_overall_results,
             "mask_scs_results": mask_scs_results,
             "mask_mcs_results": mask_mcs_results,
@@ -982,8 +983,10 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             "bbox_mcs_results": bbox_mcs_results,
         }
 
+        end_results = self._flatten_scalar_results(combined_results) if flatten_results else combined_results
+
         return copy.deepcopy({
-            "CAE": flat_class_results
+            "CAE": end_results,
         })
 
     def _log_results(self, mask_results, bbox_results, type_desc):
@@ -1124,4 +1127,14 @@ class ComponentAssociationEvaluator(GRGEvaluator):
     
     def _add_prefix(self, dictionary, prefix: str):
         return {f"{prefix}_{key.lower().replace(' ', '_')}": value for key, value in dictionary.items()}
+
+    def _flatten_scalar_results(self, results, prefix: str = ""):
+        flat = {}
+        for key, value in results.items():
+            flat_key = f"{prefix}_{key}" if prefix else key
+            if isinstance(value, Mapping):
+                flat.update(self._flatten_scalar_results(value, flat_key))
+            else:
+                flat[flat_key] = value
+        return flat
     

@@ -303,7 +303,6 @@ def main():
     )
 
     test_data = DatasetCatalog.get(test_dataset_name)
-    test_data = test_data[:1000] if len(test_data) > 1000 else test_data
 
     test_loader = build_detection_test_loader(
         dataset=test_data,
@@ -345,10 +344,10 @@ def main():
         key = f"score_threshold_{score_thresh:.2f}"
 
         evaluator.set_score_threshold(score_thresh)
-        result = evaluator.evaluate()
+        result = evaluator.evaluate(flatten_results=False)
         results[key] = result
 
-        curr = result.get("COMP_ASSOC", {})
+        curr = result.get("CAE", {})
 
         segm_source_f1 = float(curr.get("segm_f1", 0.0))
         segm_component_f1 = float(curr.get("segm_component_f1", 0.0))
