@@ -1025,6 +1025,7 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             "fp_component": 0,
             "fn_component": 0,
             "Perfect match": 0,
+            "Near-perfect match": 0,
             "Partial match": 0,
             "Wrong class": 0,
             "No match": 0,

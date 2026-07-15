@@ -127,6 +127,7 @@ class CatalogueConstructor:
             "fp_component": 0,
             "fn_component": 0,
             "Perfect match": 0,
+            "Near-perfect match": 0,
             "Partial match": 0,
             "Wrong class": 0,
             "No match": 0,
@@ -141,6 +142,7 @@ class CatalogueConstructor:
             "fp_component": 0,
             "fn_component": 0,
             "Perfect match": 0,
+            "Near-perfect match": 0,
             "Partial match": 0,
             "Wrong class": 0,
             "No match": 0,
@@ -164,15 +166,23 @@ class CatalogueConstructor:
                 reason = "Perfect match"
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "tp_source", pred_class)
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Perfect match", pred_class)
+            elif similarity >= 0.8 and gt_class == pred_class:
+                source_status = "FP"
+                reason = "Near-perfect match"
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", gt_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Near-perfect match", pred_class)
             elif similarity > 0.0 and gt_class == pred_class:
                 source_status = "FP"
                 reason = "Partial match"
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", gt_class)
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Partial match", pred_class)
             elif similarity > 0.0 and gt_class != pred_class:
                 source_status = "FP"
                 reason = "Wrong class"
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
+                self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", gt_class)
                 self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Wrong class", pred_class)
             elif similarity == 0.0:
                 source_status = "FN"
