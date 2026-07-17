@@ -256,6 +256,15 @@ class CatalogueConstructor:
             self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fn_source", pred_class)
             self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Missed source", pred_class)
 
+            # Contribute FN to componentwise counts
+            self._aggregate_counts(
+                aggregated_counts_scs,
+                aggregated_counts_mcs,
+                len(set_gt["set"][gt_source]),
+                "fn_component",
+                pred_class
+            )
+
         for pred_source in unassigned_pred_sources:
             pred_class = set_pred["class"][pred_source]
             results[pred_source] = {
@@ -272,6 +281,15 @@ class CatalogueConstructor:
             }
             self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "fp_source", pred_class)
             self._aggregate_counts(aggregated_counts_scs, aggregated_counts_mcs, 1, "Hallucinated source", pred_class)
+
+            # Contribute FP to componentwise counts
+            self._aggregate_counts(
+                aggregated_counts_scs,
+                aggregated_counts_mcs,
+                len(set_pred["set"][pred_source]),
+                "fp_component",
+                pred_class
+            )
         return results, aggregated_counts_scs, aggregated_counts_mcs
     
     def _aggregate_counts(
