@@ -1,7 +1,10 @@
 import random
 import numpy as np
+import pandas as pd
+from pycocotools import mask as mask_utils
 
 from scipy.optimize import linear_sum_assignment
+from scipy import ndimage
 
 
 class PredictionObject:
@@ -27,7 +30,28 @@ class PredictionObject:
         return pred_scores
 
 
-class CatalogueConstructor:   
+class CatalogueConstructor:
+    def reset(self):
+        self._inference_cat = []
+
+    def populate_inference_cat(self, pred_cat: dict):
+        self._inference_cat = []
+
+        for source_name, source_data in pred_cat.items():
+            for component_name in source_data["components"]:
+                row = {
+                    "component_name": component_name,
+                    "source_name": source_name,
+                    "class": source_data["class"],
+                    "score": source_data["score"],
+                    "size_pixels": source_data["size_pixels"],
+                    "image_id": source_data["image_id"],
+                }
+                self._inference_cat.append(row)
+
+    def get_inference_cat(self):
+        return pd.DataFrame(self._inference_cat)
+
     def build_gt_catalogue(self, image_id: int, image_metadata: dict, anns: list[dict]):
         """
         Treats each GT annotations as a source, and assigns components to it based on the instance_positions.
@@ -57,11 +81,16 @@ class CatalogueConstructor:
                 component_name = comp_info["component_name"]
                 components.add(component_name)
 
+            # Get RLE mask from annotation and calculate source size based on it
+            mask = mask_utils.decode(ann["segmentation"])
+            size_pixels = self._calculate_source_size_from_mask(mask)
+
             if source_name is not None:
                 sources[source_name] = {
                     "components": components,
                     "class": class_name,
                     "score": None, # for GT, score is not applicable but kept for consistency with pred format
+                    "size_pixels": size_pixels, # calculate source size based on its positions
                     "image_id": image_id,
                 }
         return sources
@@ -90,14 +119,16 @@ class CatalogueConstructor:
             pred = pred_instances[pred_idx]
             pred_obj = PredictionObject(pred)
             if mask:
-                components, pred_class, pred_score = self._build_pred_catalogue_with_masks(pred_obj, pos_map)
+                components, pred_class, pred_score, size_pixels = self._build_pred_catalogue_with_masks(pred_obj, pos_map)
             else:
-                components, pred_class, pred_score = self._build_pred_catalogue_with_boxes(pred_obj, pos_map)
-            source_name = f"pred_source_{pred_idx}"
+                components, pred_class, pred_score, size_pixels = self._build_pred_catalogue_with_boxes(pred_obj, pos_map)
+            source_name = f"pred_source_{pred_idx}_imid_{image_id}"
+
             sources[source_name] = {
                 "components": components,
                 "class": pred_class,
                 "score": pred_score,
+                "size_pixels": size_pixels, # calculate source size based on its positions
                 "image_id": image_id,
             }
         return sources
@@ -402,12 +433,13 @@ class CatalogueConstructor:
         pred_score = predictions.get_pred_scores()
 
         # Check which positions fall inside the mask
+        source_size = self._calculate_source_size_from_mask(mask)
         components = set()
         for pos, comp_info in pos_map.items():
             x, y = pos
             if mask[y, x]:  # Assuming mask is a 2D array where True indicates the predicted area
                 components.add(comp_info["component_name"])
-        return components, pred_class, pred_score
+        return components, pred_class, pred_score, source_size
     
     def _build_pred_catalogue_with_boxes(self, predictions: PredictionObject, pos_map: dict):
         x1, y1, x2, y2 = predictions.get_pred_boxes()
@@ -420,7 +452,8 @@ class CatalogueConstructor:
             x, y = pos
             if x1 <= x <= x2 and y1 <= y <= y2:
                 components.add(comp_info["component_name"])
-        return components, pred_class, pred_score
+        source_size = self._calculate_source_size_from_box((x1, y1, x2, y2))
+        return components, pred_class, pred_score, source_size
     
     def _resolve_duplicate_predictions(self, pred_rows: list[dict]) -> list[dict]:
         """
@@ -448,3 +481,70 @@ class CatalogueConstructor:
             for c in components
         }
     
+    def _calculate_source_size(self, positions: list[tuple]) -> int:
+        """
+        Helper to calculate source size based on its positions.
+        The size is just the Euclidean distance between the two most separated positions.
+        """
+        if not positions:
+            return 0
+        x_coords, y_coords = zip(*positions)
+        
+        # Calculate Euclidean distance between all pairs of positions
+        max_distance = 0
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                distance = ((x_coords[i] - x_coords[j]) ** 2 + (y_coords[i] - y_coords[j]) ** 2)
+                max_distance = max(max_distance, distance)
+        return max_distance ** 0.5
+
+    def _calculate_source_size_from_mask(self, mask: np.ndarray) -> int:
+        """
+        Helper to calculate source size based on its predicted mask.
+        The size is the number of pixels in the mask.
+        """
+        labeled, n = ndimage.label(mask)
+
+        best_dist = 0
+        best_pair = None
+
+        for label in range(1, n + 1):
+            coords = np.column_stack(np.where(labeled == label))
+
+            if len(coords) < 2:
+                continue
+
+            # extreme points
+            y, x = coords[:, 0], coords[:, 1]
+
+            candidates = coords[
+                np.unique([
+                    np.argmin(y),
+                    np.argmax(y),
+                    np.argmin(x),
+                    np.argmax(x)
+                ])
+            ]
+
+            # check distances among candidates
+            for i in range(len(candidates)):
+                for j in range(i + 1, len(candidates)):
+                    d = np.linalg.norm(candidates[i] - candidates[j])
+                    if d > best_dist:
+                        best_dist = d
+                        best_pair = (candidates[i], candidates[j])
+
+        if best_pair is None:
+            return 0.0
+
+        p1, p2 = best_pair
+        return np.linalg.norm(p1 - p2)
+    
+    def _calculate_source_size_from_box(self, box: tuple) -> int:
+        """
+        Helper to calculate source size based on its predicted bounding box.
+        The size is the diagonal length of the bounding box.
+        """
+        x1, y1, x2, y2 = box
+        return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            

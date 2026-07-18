@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 import copy
 from collections.abc import Mapping
+import pandas as pd
 
 # Add detectron2 to path (assumes detectron2 is in the parent directory structure)
 detectron2_root = Path(__file__).parent.parent.parent.parent
@@ -917,7 +918,14 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             self._logger.warning("[ComponentAssociationEvaluator] Did not receive valid predictions.")
             return {}
 
-        overall = self._gather_predictions()
+        overall, mcs_gt_sizes, mcs_pred_sizes = self._gather_predictions()
+
+        pd.DataFrame({
+            "mcs_gt_size": mcs_gt_sizes,
+        }).to_csv("/home/s4861264/detectron2/projects/LoTSS-GRG-detect/results/sizes/component_association_mcs_size_analysis_gt.csv", index=False)
+        pd.DataFrame({
+            "mcs_pred_size": mcs_pred_sizes,
+        }).to_csv("/home/s4861264/detectron2/projects/LoTSS-GRG-detect/results/sizes/component_association_mcs_size_analysis_pred.csv", index=False)
 
         comp_map = {
             "tp": "tp_component",
@@ -973,7 +981,6 @@ class ComponentAssociationEvaluator(GRGEvaluator):
         # ======= Log MCS results ========
         self._log_results(mask_mcs_results, bbox_mcs_results, type_desc="mcs")
 
-        # 
         combined_results = {
             "mask_overall_results": mask_overall_results,
             "mask_scs_results": mask_scs_results,
@@ -1039,6 +1046,8 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             "bbox_mcs": base_dict.copy(),
         }
 
+        mcs_gt_sizes = []
+        mcs_pred_sizes = []
         for prediction in self._predictions:
             image_id = prediction["image_id"]
             anns, image_metadata = self._load_image_context(image_id)
@@ -1056,6 +1065,19 @@ class ComponentAssociationEvaluator(GRGEvaluator):
                 bbox_pred_cat = self._catalogue_constructor.build_pred_catalogue(
                     image_id, image_metadata, pred_instances, mask=False
                 )
+
+                # Commented out for training
+                for _, source_info in mask_pred_cat.items():
+                    size_pixels = source_info.get("size_pixels")
+                    pred_class = source_info.get("class")
+                    if size_pixels is not None and pred_class=="MCS":
+                        mcs_pred_sizes.append(size_pixels)
+
+                for _, source_info in gt_cat.items():
+                    size_pixels = source_info.get("size_pixels")
+                    gt_class = source_info.get("class")
+                    if size_pixels is not None and gt_class=="MCS":
+                        mcs_gt_sizes.append(size_pixels)
 
             _, mask_counts_scs, mask_counts_mcs = self._catalogue_constructor.compare_catalogues(
                 gt_cat, mask_pred_cat
@@ -1077,7 +1099,7 @@ class ComponentAssociationEvaluator(GRGEvaluator):
             bbox_overall[key] = results["bbox_scs"][key] + results["bbox_mcs"][key]
         results["mask_overall"] = mask_overall
         results["bbox_overall"] = bbox_overall
-        return results
+        return results, mcs_gt_sizes, mcs_pred_sizes
 
     def _load_image_context(self, image_id: int):
         ann_ids = self.coco.getAnnIds(imgIds=[image_id], iscrowd=None)
